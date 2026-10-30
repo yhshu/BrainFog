@@ -94,6 +94,7 @@ struct ContextLensView: View {
 struct AgentSection: View {
     @Environment(AppModel.self) private var model
     @State private var showUnused = false
+    @State private var showGlobalSkills = false
     @State private var isDropTarget = false
     @State private var pendingCopy: PendingCopy?
     @State private var copyError: String?
@@ -234,22 +235,12 @@ struct AgentSection: View {
                     .disabled(option.exists)
                 }
             } else {
-                Button("New Skill…") {
-                    ask("New Skill") { name in
-                        // The name becomes a folder, so it must be a single path component.
-                        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !name.contains("/"), !name.hasPrefix(".") else {
-                            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: name])
-                        }
-                        let folder = SkillResolver.newSkillFolder(named: name, agent: context.agent, project: project)
-                        let file = folder.appendingPathComponent("SKILL.md")
-                        if FileManager.default.fileExists(atPath: file.path) {
-                            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: file.path])
-                        }
-                        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                        try SkillResolver.template(name: name).write(to: file, atomically: true, encoding: .utf8)
-                        return file
-                    }
+                if let project {
+                    // A project page offers both layers, saying where each goes.
+                    skillButton("Project Skill…", detail: "Only in this project, in \(skillDir(project))", project: project)
+                    skillButton("Global Skill…", detail: "In every project, in \(skillDir(nil))", project: nil)
+                } else {
+                    skillButton("New Skill…", detail: "In every project, in \(skillDir(nil))", project: nil)
                 }
             }
         } label: {
@@ -259,6 +250,36 @@ struct AgentSection: View {
         .fixedSize()
         .help(mode == .context ? "Create an instruction file \(context.agent.displayName) reads"
                                : "Create a skill for \(context.agent.displayName)")
+    }
+
+    /// Where a new skill for this agent goes, shown relative to the project or home.
+    private func skillDir(_ project: URL?) -> String {
+        let folder = SkillResolver.newSkillFolder(named: "", agent: context.agent, project: project)
+        guard let project else { return displayPath(folder) }
+        return String(folder.path.dropFirst(project.path.count + 1))
+    }
+
+    private func skillButton(_ title: String, detail: String, project: URL?) -> some View {
+        Button {
+            ask(project == nil ? "New Global Skill" : "New Project Skill") { name in
+                // The name becomes a folder, so it must be a single path component.
+                let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.contains("/"), !name.hasPrefix(".") else {
+                    throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: name])
+                }
+                let folder = SkillResolver.newSkillFolder(named: name, agent: context.agent, project: project)
+                let file = folder.appendingPathComponent("SKILL.md")
+                if FileManager.default.fileExists(atPath: file.path) {
+                    throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: file.path])
+                }
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try SkillResolver.template(name: name).write(to: file, atomically: true, encoding: .utf8)
+                return file
+            }
+        } label: {
+            Text(title)
+            Text(detail)
+        }
     }
 
     private func ask(_ title: String, _ create: @escaping (String) throws -> URL) {
@@ -271,11 +292,16 @@ struct AgentSection: View {
         do {
             let url = try make()
             model.selectedEntry = ContextEntry(agent: context.agent, url: url.standardizedFileURL,
-                                               scope: project == nil ? .user : .project, timing: .launch)
+                                               scope: isInProject(url) ? .project : .user, timing: .launch)
             model.resolve()
         } catch {
             copyError = error.localizedDescription
         }
+    }
+
+    private func isInProject(_ url: URL) -> Bool {
+        guard let project else { return false }
+        return url.standardizedFileURL.path.hasPrefix(project.standardizedFileURL.path + "/")
     }
 
     // MARK: Instructions & memory
@@ -321,19 +347,44 @@ struct AgentSection: View {
 
     // MARK: Skills
 
+    /// On a project page, the project's own skills come first and the global
+    /// ones (which the agent also lists there) fold away below them.
     @ViewBuilder private var skillGroups: some View {
         let listed = context.skills.filter { $0.timing.isLoadedAtLaunch }
-        let hidden = context.skills.filter { !$0.timing.isLoadedAtLaunch }
         let tokens = listed.reduce(0) { $0 + $1.tokens }
         GroupHeader(title: "Listed every session",
                     detail: listed.isEmpty ? "no skills"
                         : "\(listed.count) \(listed.count == 1 ? "skill" : "skills") · about \(tokens.tokenLabel) tokens")
-            .help("Each skill’s name and description are listed at the start of every session; the rest of SKILL.md is read only when the skill is used. \(tokenHelp)")
-        ForEach(listed) { SkillRow(skill: $0) }
-        if !hidden.isEmpty {
-            GroupHeader(title: "Not used", detail: "\(hidden.count) \(hidden.count == 1 ? "skill" : "skills")")
+            .help("Each skill’s name and description are listed at the start of every session; the rest of SKILL.md is read only when the skill is used. Skills a higher-priority one replaces are dimmed. \(tokenHelp)")
+        if let project {
+            let own = context.skills.filter { $0.scope == .project }
+            let shared = context.skills.filter { $0.scope != .project }
+            GroupHeader(title: "This project", detail: "\(own.count) \(own.count == 1 ? "skill" : "skills")")
                 .padding(.top, 6)
-            ForEach(hidden) { SkillRow(skill: $0) }
+            if own.isEmpty {
+                NoteText(text: "None yet. New → Project Skill adds one in \(skillDir(project)), only for this project.")
+            }
+            ForEach(own) { SkillRow(skill: $0) }
+            if !shared.isEmpty {
+                Button {
+                    withAnimation { showGlobalSkills.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        GroupHeader(title: "Global", detail: "\(shared.count) \(shared.count == 1 ? "skill" : "skills") · shared by every project")
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(showGlobalSkills ? 90 : 0))
+                        Spacer()
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .help("Skills from your home folder and the agent itself, also listed in this project")
+                .padding(.top, 6)
+                if showGlobalSkills { ForEach(shared) { SkillRow(skill: $0) } }
+            }
+        } else {
+            ForEach(listed) { SkillRow(skill: $0) }
+            ForEach(context.skills.filter { !$0.timing.isLoadedAtLaunch }) { SkillRow(skill: $0) }
         }
     }
 
