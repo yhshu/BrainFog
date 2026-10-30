@@ -182,6 +182,107 @@ struct AgentStatusChip: View {
     }
 }
 
+/// On the global page: do the agents' global instructions come from one file?
+struct GlobalSyncCard: View {
+    @Environment(AppModel.self) private var model
+    let report: GlobalSyncReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("Shared global instructions", systemImage: "doc.on.doc")
+                    .font(.headline)
+                Text(summary).foregroundStyle(.secondary).font(.subheadline)
+                Spacer()
+                if let source = report.source, report.targets.contains(where: { $0.state == .drifted }),
+                   let change = report.sync(from: source) {
+                    Button("Sync All…") { model.pendingChange = change }
+                        .buttonStyle(.borderedProminent)
+                }
+                sourceMenu
+            }
+            if report.source == nil {
+                Text("Each agent has its own global file. Pick one to be the source: Claude Code imports it and the others get a copy that BrainFog keeps in step.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            FlowLayout(spacing: 6) {
+                ForEach(report.targets) { SyncChip(target: $0) }
+            }
+        }
+        .modifier(CardChrome())
+    }
+
+    private var summary: String {
+        guard let source = report.source else { return "not shared" }
+        let synced = report.targets.filter { $0.state == .synced || $0.state == .source }.count
+        let total = report.targets.filter { $0.state != .unsupported }.count
+        return "from \(displayPath(source)) · \(synced) of \(total) agents in step"
+    }
+
+    private var sourceMenu: some View {
+        Menu(report.source == nil ? "Use One File for All" : "Change Source") {
+            ForEach(report.candidates, id: \.self) { file in
+                Button {
+                    model.pendingChange = report.sync(from: file)
+                } label: {
+                    Text(displayPath(file))
+                    Text(report.targets.filter { $0.file == file }.map(\.agent.displayName).joined(separator: ", "))
+                }
+            }
+            if report.candidates.isEmpty {
+                Text("No agent has global instructions yet")
+            }
+        }
+        .fixedSize()
+    }
+}
+
+private struct SyncChip: View {
+    let target: GlobalSyncReport.Target
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol).foregroundStyle(color)
+            Text(target.agent.displayName).font(.callout)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(.quaternary.opacity(0.6), in: .capsule)
+        .help(help)
+    }
+
+    private var symbol: String {
+        switch target.state {
+        case .source: "star.circle.fill"
+        case .synced: "checkmark.circle.fill"
+        case .drifted: "exclamationmark.triangle.fill"
+        case .separate: "circle"
+        case .missing: "circle.dashed"
+        case .unsupported: "minus.circle"
+        }
+    }
+
+    private var color: Color {
+        switch target.state {
+        case .source, .synced: target.agent.tint
+        case .drifted: .orange
+        default: .secondary
+        }
+    }
+
+    private var help: String {
+        let file = target.file.map(displayPath) ?? ""
+        return switch target.state {
+        case .source: "\(file) is the source"
+        case .synced: "\(file) is in step with the source"
+        case .drifted: "\(file) no longer matches the source"
+        case .separate: "\(file) has its own text"
+        case .missing: "No \(file) yet"
+        case .unsupported: "Keeps global rules in its settings, not in a file"
+        }
+    }
+}
+
 /// Problems found across all agents, each with its fix when there is one.
 struct HealthCard: View {
     @Environment(AppModel.self) private var model

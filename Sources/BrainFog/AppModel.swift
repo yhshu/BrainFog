@@ -34,6 +34,8 @@ final class AppModel {
     var servers: [AgentID: [MCPServer]] = [:]
     /// Whether every agent reads the project's AGENTS.md; nil on the global page.
     var sharing: SharingReport?
+    /// Whether the agents' global instructions come from one file; nil on a project page.
+    var globalSync: GlobalSyncReport?
     var health: [HealthIssue] = []
     var selectedEntry: ContextEntry?
     /// A change waiting for the user to review it.
@@ -125,26 +127,29 @@ final class AppModel {
         guard let place = selection else { contexts = []; return }
         isResolving = true
         resolveTask = Task {
-            let (result, servers, sharing, health) = await Task.detached(priority: .userInitiated) {
+            let (result, servers, sharing, globalSync, health) = await Task.detached(priority: .userInitiated) {
                 let result = Self.contexts(for: place)
                 let project: URL? = if case .project(let url) = place { url } else { nil }
                 let servers = Dictionary(uniqueKeysWithValues: AgentID.allCases.map {
                     ($0, MCPResolver.resolve(agent: $0, project: project))
                 })
                 let sharing = project.map { SharingReport.analyze(project: $0, contexts: result) }
+                let globalSync = project == nil ? GlobalSyncReport.analyze() : nil
                 let health = HealthCheck.run(project: project, contexts: result,
                                              servers: servers.values.flatMap { $0 })
+                    + (globalSync?.issues() ?? [])
                 // Keep a version of every file as it is now, so changes made
                 // by the agents themselves show up in each file's history.
                 for url in Set(result.flatMap { $0.entries.map(\.url) + $0.skills.map(\.url) }) where url.isFileURL {
                     History.shared.observe(url)
                 }
-                return (result, servers, sharing, health)
+                return (result, servers, sharing, globalSync, health)
             }.value
             guard !Task.isCancelled else { return }
             contexts = result
             self.servers = servers
             self.sharing = sharing
+            self.globalSync = globalSync
             self.health = health
             isResolving = false
             historyRevision += 1

@@ -42,6 +42,7 @@ struct ContextLensView: View {
                     header
                     if mode == .context {
                         if let sharing = model.sharing { SharingCard(report: sharing) }
+                        if let sync = model.globalSync { GlobalSyncCard(report: sync) }
                         if !model.health.isEmpty { HealthCard(issues: model.health) }
                     }
                     if mode == .timeline {
