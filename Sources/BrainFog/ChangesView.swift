@@ -42,7 +42,6 @@ struct ChangePreview: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.glassProminent)
             }
             .padding(16)
         }
@@ -134,10 +133,10 @@ struct SharingCard: View {
                 Spacer()
                 if let setup = report.setup {
                     Button(setup.title) { model.pendingChange = setup }
-                        .buttonStyle(.glassProminent)
+                        .buttonStyle(.borderedProminent)
                 } else if let all = report.fixAll {
                     Button("Fix All…") { model.pendingChange = all }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.bordered)
                 }
             }
             if report.exists {
@@ -154,9 +153,7 @@ struct SharingCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
+        .modifier(CardChrome())
     }
 
     private var summary: String {
@@ -232,9 +229,7 @@ struct HealthCard: View {
                 }
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
+        .modifier(CardChrome())
     }
 
     private var summary: String {

@@ -109,7 +109,7 @@ struct EditorView: View {
             }
             Button("Save") { save(force: false) }
                 .keyboardShortcut("s")
-                .buttonStyle(.glassProminent)
+                .buttonStyle(.borderedProminent)
                 .tint(entry.agent.tint)
                 .disabled(!isDirty)
                 .help("Write the file to disk (⌘S)")

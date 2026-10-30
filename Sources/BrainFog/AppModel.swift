@@ -49,6 +49,10 @@ final class AppModel {
 
     init() {
         reloadProjects()
+        // Development aid for BRAINFOG_SNAPSHOT: open on a given folder.
+        if let path = ProcessInfo.processInfo.environment["BRAINFOG_SNAPSHOT_PROJECT"] {
+            selection = .project(URL(fileURLWithPath: path))
+        }
         resolve()
     }
 

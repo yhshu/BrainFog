@@ -27,7 +27,8 @@ struct ContextLensView: View {
     /// The agent whose section fills the top of the view with its own
     /// header scrolled away, so a pinned copy of the header says whose it is.
     @State private var pinned: AgentID?
-    /// Window y of the top of the visible area, below the toolbar.
+    /// Window y of the bottom of the pinned-header bar, where content stops
+    /// being covered.
     @State private var visibleTop: CGFloat = 0
     @State private var scroll = ScrollPosition()
 
@@ -41,23 +42,21 @@ struct ContextLensView: View {
                         if !model.health.isEmpty { HealthCard(issues: model.health) }
                     }
                     // One full-width section per agent, stacked top to bottom.
-                    GlassEffectContainer(spacing: 16) {
-                        VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 16) {
                             ForEach(model.contexts, id: \.agent) { ctx in
                                 AgentSection(context: ctx, mode: mode)
                                     .id(ctx.agent)
                                     .onGeometryChange(for: Bool.self) { geo in
                                         // Its title row is out of sight but the rest isn't.
                                         let f = geo.frame(in: .global)
-                                        return f.minY < visibleTop - 44 && f.maxY > visibleTop + 80
+                                        return f.minY < visibleTop - 40 && f.maxY > visibleTop + 60
                                     } action: { covers in
                                         if covers { pinned = ctx.agent } else if pinned == ctx.agent { pinned = nil }
                                     }
-                            }
                         }
                     }
                 }
-                .padding(24)
+                .padding([.horizontal, .bottom], 24)
             }
             .scrollPosition($scroll)
             .onAppear {
@@ -66,30 +65,43 @@ struct ContextLensView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { scroll.scrollTo(y: y) }
                 }
             }
-            .overlay(alignment: .top) {
-                ZStack(alignment: .top) {
-                    Color.clear.frame(height: 0)
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { visibleTop = $0 }
+            // A bar of fixed height under the toolbar, so the content's
+            // insets never change as a header comes and goes. Content scrolls
+            // under it and the toolbar's soft edge blurs both, the way a
+            // list's sticky section header sits, rather than a second layer
+            // of glass floating over the cards.
+            .safeAreaBar(edge: .top) {
+                ZStack(alignment: .leading) {
                     if let agent = pinned, let ctx = model.contexts.first(where: { $0.agent == agent }) {
                         PinnedAgentHeader(context: ctx, summary: pinnedSummary(ctx)) {
                             withAnimation { proxy.scrollTo(agent, anchor: .top) }
                         }
-                        .padding(.horizontal, 24).padding(.top, 6)
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .transition(.opacity)
                     }
                 }
+                // Lined up with the section headers inside the cards.
+                .padding(.horizontal, 40)
+                .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { visibleTop = $0 }
                 .animation(.easeOut(duration: 0.15), value: pinned)
             }
             .onChange(of: mode) { pinned = nil }
             .onChange(of: model.selection) { pinned = nil }
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
-        .background(backdrop)
+        .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(model.selection?.title ?? "BrainFog")
         .toolbar(removing: .title)
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                ModeSwitcher(mode: $mode)
+            // Toolbar toggles, so they take the same size and capsule as
+            // the sidebar's toolbar buttons.
+            ToolbarItemGroup(placement: .navigation) {
+                ForEach(LensMode.allCases, id: \.self) { m in
+                    Toggle(isOn: Binding(get: { mode == m }, set: { if $0 { mode = m } })) {
+                        Label(m.title, systemImage: m.symbol)
+                    }
+                    .help(m.title)
+                }
             }
         }
     }
@@ -134,21 +146,6 @@ struct ContextLensView: View {
             Text(subtitle).font(.caption).foregroundStyle(.tertiary)
                 .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
         }
-    }
-
-    /// Soft agent-colored glow behind the glass so it has something to refract.
-    private var backdrop: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            ForEach(Array(AgentID.allCases.enumerated()), id: \.offset) { i, agent in
-                Circle()
-                    .fill(agent.tint.opacity(0.18))
-                    .frame(width: 520, height: 520)
-                    .blur(radius: 120)
-                    .offset(x: (CGFloat(i) - CGFloat(AgentID.allCases.count - 1) / 2) * 380, y: -160)
-            }
-        }
-        .ignoresSafeArea()
     }
 }
 
@@ -537,24 +534,60 @@ struct AgentSection: View {
 
 }
 
-/// The glass card behind each agent section, lit up while a file is dragged over it.
+/// The card behind each agent section, lit up while a file is dragged over
+/// it. Cards hold content, so they are a plain grouped fill rather than
+/// Liquid Glass, which the Human Interface Guidelines keep for controls and
+/// navigation.
 struct SectionChrome: ViewModifier {
     let agent: AgentID
     let isDropTarget: Bool
 
     func body(content: Content) -> some View {
-        content
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .glassEffect(isDropTarget ? .regular.tint(agent.tint.opacity(0.3)) : .regular,
-                         in: .rect(cornerRadius: 24))
+        content.modifier(CardChrome(fill: isDropTarget ? AnyShapeStyle(agent.tint.opacity(0.12)) : nil))
             .overlay {
                 if isDropTarget {
-                    RoundedRectangle(cornerRadius: 24).strokeBorder(agent.tint, lineWidth: 2)
+                    RoundedRectangle(cornerRadius: cardRadius, style: .continuous).strokeBorder(agent.tint, lineWidth: 2)
                 }
             }
     }
 }
+
+let cardRadius: CGFloat = 16
+
+/// A grouped-content card, like a section of a grouped form in System Settings.
+struct CardChrome: ViewModifier {
+    var fill: AnyShapeStyle?
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+        content
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .background(fill ?? AnyShapeStyle(.background.secondary), in: shape)
+            .overlay { shape.strokeBorder(.separator.opacity(0.6), lineWidth: 0.5) }
+            .containerShape(shape)
+    }
+}
+
+/// The background of a clickable row inside a card: nothing at rest, a
+/// light fill on hover, and the agent's colour while its file is open.
+struct RowChrome: ViewModifier {
+    let tint: Color
+    let isSelected: Bool
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(isSelected ? AnyShapeStyle(tint.opacity(0.18))
+                        : isHovered ? AnyShapeStyle(.quaternary.opacity(0.6)) : AnyShapeStyle(.clear),
+                        in: rowShape)
+            .onHover { isHovered = $0 }
+    }
+}
+
+/// Rows inside a section card round concentrically with the card, as the
+/// Human Interface Guidelines ask of nested shapes.
+let rowShape = ConcentricRectangle(corners: .concentric(minimum: 8), isUniform: true)
 
 struct SkillRow: View {
     @Environment(AppModel.self) private var model
@@ -580,19 +613,17 @@ struct SkillRow: View {
                 if !skill.description.isEmpty {
                     Text(skill.description).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
-                Text(displayPath(skill.folder)).font(.caption).foregroundStyle(.tertiary)
+                Text(displayPath(skill.folder, in: model.project)).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
                 if let why = reason {
                     Text(why).font(.caption).foregroundStyle(.tertiary)
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
-            .contentShape(.rect(cornerRadius: 14))
+            .contentShape(rowShape)
         }
         .buttonStyle(.plain)
-        .glassEffect(isSelected ? .regular.tint(skill.agent.tint.opacity(0.35)).interactive()
-                                : .regular.interactive(),
-                     in: .rect(cornerRadius: 14))
+        .modifier(RowChrome(tint: skill.agent.tint, isSelected: isSelected))
         .opacity(skill.timing.isLoadedAtLaunch ? 1 : 0.55)
         .help("Click to edit SKILL.md")
         .contextMenu {
@@ -618,6 +649,24 @@ struct SkillRow: View {
 func displayPath(_ url: URL) -> String {
     guard url.isFileURL else { return url.absoluteString }
     return url.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+}
+
+/// A path as a row shows it: relative to the project when it is inside it,
+/// since every such row would otherwise repeat the project's own path.
+func displayPath(_ url: URL, in project: URL?) -> String {
+    guard url.isFileURL, let project else { return displayPath(url) }
+    // Resolve links on both sides, so /tmp and /private/tmp compare equal.
+    let root = project.resolvingSymlinksInPath().path + "/"
+    let path = url.resolvingSymlinksInPath().path
+    return path.hasPrefix(root) ? String(path.dropFirst(root.count)) : displayPath(url)
+}
+
+extension AppModel {
+    /// The folder of the project page, or nil on the global page.
+    var project: URL? {
+        if case .project(let url) = selection { return url }
+        return nil
+    }
 }
 
 /// Moves a file or folder to the Trash, closing it in the editor first.
@@ -708,7 +757,7 @@ struct EntryCard: View {
                                 .help(tokenHelp)
                         }
                     }
-                    Text(displayPath(entry.url)).font(.caption).foregroundStyle(.secondary)
+                    Text(displayPath(entry.url, in: model.project)).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                     if let detail {
                         Text(detail).font(.caption).foregroundStyle(.tertiary)
@@ -716,12 +765,10 @@ struct EntryCard: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
-            .contentShape(.rect(cornerRadius: 14))
+            .contentShape(rowShape)
         }
         .buttonStyle(.plain)
-        .glassEffect(isSelected ? .regular.tint(entry.agent.tint.opacity(0.35)).interactive()
-                                : .regular.interactive(),
-                     in: .rect(cornerRadius: 14))
+        .modifier(RowChrome(tint: entry.agent.tint, isSelected: isSelected))
         .opacity(isSkipped ? 0.55 : 1)
         .draggable(entry.url)
         .help("Click to edit. Drag onto another agent to copy it there.")
@@ -831,14 +878,14 @@ struct ServerRow: View {
                 }
                 Text(server.summary).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
-                Text(([displayPath(server.file)] + [server.note].compactMap { $0 }).joined(separator: " · "))
-                    .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                Text(([displayPath(server.file, in: model.project)] + [server.note].compactMap { $0 }).joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
-            .contentShape(.rect(cornerRadius: 14))
+            .contentShape(rowShape)
         }
         .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 14))
+        .modifier(RowChrome(tint: server.agent.tint, isSelected: false))
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 2) {
                 Toggle("On", isOn: Binding(get: { server.enabled }, set: { setEnabled($0) }))
@@ -925,55 +972,29 @@ struct ServerRow: View {
 }
 
 /// The header of the agent section being read, kept at the top of the view
-/// while the section's own header is scrolled away. Clicking it goes back to
+/// while the section's own header is scrolled away. It is set like the
+/// section's header, in the bar under the toolbar. Clicking it goes back to
 /// the start of the section.
 struct PinnedAgentHeader: View {
     let context: ResolvedContext
     let summary: String
     let jump: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: jump) {
-            HStack(spacing: 10) {
-                AgentIcon(agent: context.agent, size: 24)
+            HStack(spacing: 8) {
+                AgentIcon(agent: context.agent, size: 22)
                 Text(context.agent.displayName).font(.headline)
                 Text(summary).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-                Spacer(minLength: 0)
                 Image(systemName: "arrow.up").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    .opacity(isHovered ? 1 : 0)
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .contentShape(.rect(cornerRadius: 16))
+            .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .glassEffect(.regular.tint(context.agent.tint.opacity(0.18)), in: .rect(cornerRadius: 16))
+        .onHover { isHovered = $0 }
         .help("Back to the start of \(context.agent.displayName)’s section")
-    }
-}
-
-/// The view switcher in the toolbar. A segmented picker draws dividers
-/// between unselected segments at the leading edge of the toolbar, so this
-/// is a row of icon buttons with the selected one on a capsule.
-struct ModeSwitcher: View {
-    @Binding var mode: LensMode
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(LensMode.allCases, id: \.self) { m in
-                Button {
-                    mode = m
-                } label: {
-                    Image(systemName: m.symbol)
-                        .frame(width: 30, height: 22)
-                        .contentShape(.capsule)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(mode == m ? .primary : .secondary)
-                .background(mode == m ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
-                .help(m.title)
-                .accessibilityLabel(m.title)
-                .accessibilityAddTraits(mode == m ? .isSelected : [])
-            }
-        }
-        .padding(.horizontal, 4)
     }
 }

@@ -111,8 +111,10 @@ Principles:
 
 ## 5. Design language
 
-- macOS 26 Liquid Glass: `glassEffect`, `GlassEffectContainer`, `.buttonStyle(.glass)`; the content area stays clear, and glass is used only for overlays and the controls layer.
-- Each agent has a stable identifying color, applied to glass tint and layer labels.
+- Follows the macOS Human Interface Guidelines. Liquid Glass is left to the system's own controls and navigation (toolbar, sidebar); content sits on plain grouped cards (`CardChrome`), with rows that round concentrically inside them and show only a hover or selection fill. Light and dark appearance both come from system colors.
+- Toolbar controls are system toolbar items, so they share one size and capsule. The header of the agent being read is pinned in a bar under the toolbar, inside the toolbar's scroll edge effect.
+- On a project page, paths inside the project are shown relative to it.
+- Each agent has a stable identifying color, applied to its icon, token bar and selected rows.
 - Keyboard first: ⌘S save, ⌘R rescan, ⌘1/2/3 switch agent.
 
 ## 6. Milestones

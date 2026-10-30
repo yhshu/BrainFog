@@ -99,7 +99,6 @@ struct ServerForm: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Review Change…", action: review)
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.glassProminent)
                     .disabled(!isValid || (existing == nil && file == nil))
             }
             .padding(16)

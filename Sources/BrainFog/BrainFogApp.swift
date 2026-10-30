@@ -47,6 +47,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+        if ProcessInfo.processInfo.environment["BRAINFOG_SNAPSHOT_DARK"] != nil {
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
         if let path = ProcessInfo.processInfo.environment["BRAINFOG_SNAPSHOT"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Self.snapshot(to: path) }
         }
