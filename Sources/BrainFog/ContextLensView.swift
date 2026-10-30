@@ -175,7 +175,7 @@ struct AgentSection: View {
                 .buttonStyle(.plain)
                 .allowsHitTesting(hasItems)
                 .help(isCollapsed ? "Show \(context.agent.displayName)’s files" : "Fold \(context.agent.displayName)’s section")
-                if mode == .skills || !newFileOptions.isEmpty { addMenu }
+                if mode == .skills || !newFileOptions.isEmpty || !globalFileOptions.isEmpty { addMenu }
             }
             if !isCollapsed {
                 if mode == .context { contextGroups } else { skillGroups }
@@ -217,22 +217,21 @@ struct AgentSection: View {
         NewFileOption.options(for: context.agent, project: project)
     }
 
+    /// On a project page, the global files too, so either layer can be
+    /// started from here.
+    private var globalFileOptions: [NewFileOption] {
+        project == nil ? [] : NewFileOption.options(for: context.agent, project: nil)
+    }
+
     /// "+" menu: new instruction files where this agent reads them, or a new skill.
     private var addMenu: some View {
         Menu {
             if mode == .context {
-                ForEach(newFileOptions) { option in
-                    Button {
-                        if option.needsName {
-                            ask("New Rule File") { try option.create(name: $0) }
-                        } else {
-                            create { try option.create() }
-                        }
-                    } label: {
-                        Text(option.title + (option.exists ? " (already exists)" : ""))
-                        Text(option.detail)
-                    }
-                    .disabled(option.exists)
+                if globalFileOptions.isEmpty {
+                    fileButtons(newFileOptions)
+                } else {
+                    Section("This Project") { fileButtons(newFileOptions) }
+                    Section("Global (Every Project)") { fileButtons(globalFileOptions) }
                 }
             } else {
                 if let project {
@@ -250,6 +249,24 @@ struct AgentSection: View {
         .fixedSize()
         .help(mode == .context ? "Create an instruction file \(context.agent.displayName) reads"
                                : "Create a skill for \(context.agent.displayName)")
+    }
+
+    @ViewBuilder private func fileButtons(_ options: [NewFileOption]) -> some View {
+        ForEach(options) { option in
+            Button {
+                if option.needsName {
+                    ask(project != nil && !isInProject(option.url) ? "New Global Rule File" : "New Rule File") {
+                        try option.create(name: $0)
+                    }
+                } else {
+                    create { try option.create() }
+                }
+            } label: {
+                Text(option.title + (option.exists ? " (already exists)" : ""))
+                Text(option.detail)
+            }
+            .disabled(option.exists)
+        }
     }
 
     /// Where a new skill for this agent goes, shown relative to the project or home.
