@@ -29,6 +29,17 @@ struct EntryList {
         return text
     }
 
+    /// Marks an entry already listed as loaded at launch through an import.
+    /// Returns its text when it was not loaded at launch before.
+    mutating func promote(_ url: URL, importedBy: URL) -> String? {
+        let path = url.standardizedFileURL.path
+        guard let i = entries.firstIndex(where: { $0.url.path == path }),
+              !entries[i].timing.isLoadedAtLaunch else { return nil }
+        entries[i].timing = .launch
+        entries[i].importedBy = importedBy
+        return FileSupport.read(url) ?? ""
+    }
+
     /// Lists something that is not a local file, such as a remote URL.
     mutating func addRemote(_ url: URL, scope: Scope, timing: LoadTiming, note: String) {
         guard !seen.contains(url.absoluteString) else { return }

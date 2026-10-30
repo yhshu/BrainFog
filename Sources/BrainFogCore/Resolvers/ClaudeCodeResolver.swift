@@ -43,11 +43,8 @@ public struct ClaudeCodeResolver: ContextResolver {
 
         // 2. Ancestors, root first. CLAUDE.md files win over AGENTS.md.
         let ancestors = FileSupport.ancestors(of: cwd)
-        let claudeNames = ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"]
         let agentsNames = ["AGENTS.md", ".claude/AGENTS.md"]
-        let claudeFiles = ancestors.flatMap { dir in
-            claudeNames.map { dir.appendingPathComponent($0).standardizedFileURL }
-        }.filter { FileSupport.isFile($0) && $0.path != userFile.standardizedFileURL.path }
+        let claudeFiles = Self.claudeFiles(above: cwd, home: env.home)
         let readsAgents = claudeFiles.isEmpty
 
         for dir in ancestors {
@@ -80,9 +77,9 @@ public struct ClaudeCodeResolver: ContextResolver {
         }
 
         // 3. Subdirectory files load on demand.
-        for url in FileSupport.walk(cwd, maxDepth: 5) where
-            ["CLAUDE.md", "CLAUDE.local.md"].contains(url.lastPathComponent)
-            && url.deletingLastPathComponent().path != cwd.path {
+        for url in FileSupport.walk(cwd, maxDepth: 5, include: {
+            ["CLAUDE.md", "CLAUDE.local.md"].contains($0.lastPathComponent)
+        }) where url.deletingLastPathComponent().path != cwd.path {
             let rel = url.deletingLastPathComponent().path.dropFirst(cwd.path.count + 1)
             add(url, url.lastPathComponent == "CLAUDE.local.md" ? .local : .directory,
                 .onDemand("when Claude reads or edits files in \(rel)/"))
@@ -93,6 +90,16 @@ public struct ClaudeCodeResolver: ContextResolver {
                       settings: settings, env: env, into: &list)
 
         return list.finish(workingDirectory: cwd, projectRoot: projectRoot)
+    }
+
+    /// CLAUDE.md, .claude/CLAUDE.md and CLAUDE.local.md files from the root
+    /// down to `cwd`, leaving out the user file. When there are none, Claude
+    /// Code reads AGENTS.md instead.
+    static func claudeFiles(above cwd: URL, home: URL) -> [URL] {
+        let userFile = home.appendingPathComponent(".claude/CLAUDE.md").standardizedFileURL
+        return FileSupport.ancestors(of: cwd).flatMap { dir in
+            ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"].map { dir.appendingPathComponent($0).standardizedFileURL }
+        }.filter { FileSupport.isFile($0) && $0.path != userFile.path }
     }
 
     private func addRules(in dir: URL, base: URL, into list: inout EntryList) {
@@ -150,6 +157,14 @@ public struct ClaudeCodeResolver: ContextResolver {
                 list.diagnostics.append(.init(.warning, "@\(path) exceeds the \(Self.maxImportHops)-hop import limit and is not loaded", url: file))
                 continue
             }
+            // Already listed, say as a path-scoped rule or a skipped AGENTS.md:
+            // an import at launch loads it at launch all the same.
+            if list.contains(target) {
+                if timing.isLoadedAtLaunch, let sub = list.promote(target, importedBy: file) {
+                    addImports(of: target, text: sub, timing: timing, hops: hops + 1, home: home, into: &list)
+                }
+                continue
+            }
             guard let sub = list.add(target, scope: .imported, timing: timing, importedBy: file) else { continue }
             addImports(of: target, text: sub, timing: timing, hops: hops + 1, home: home, into: &list)
         }
@@ -167,7 +182,9 @@ public struct ClaudeCodeResolver: ContextResolver {
             let re = try! NSRegularExpression(pattern: #"(?:^|\s)@([^\s`]+)"#)
             for m in re.matches(in: stripped, range: NSRange(stripped.startIndex..., in: stripped)) {
                 guard let r = Range(m.range(at: 1), in: stripped) else { continue }
-                let token = String(stripped[r]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;:)]}"))
+                // Trailing punctuation only: a leading ./ or ../ is part of the path.
+                var token = String(stripped[r])
+                while let last = token.last, ".,;:)]}".contains(last) { token.removeLast() }
                 let pathLike = ["~/", "./", "../", "/"].contains { token.hasPrefix($0) }
                     || token.range(of: #"\.[A-Za-z0-9]{1,8}$"#, options: .regularExpression) != nil
                 if pathLike { paths.append(token) }

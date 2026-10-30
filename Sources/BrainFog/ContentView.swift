@@ -22,8 +22,10 @@ struct ContentView: View {
                     .frame(minWidth: 560)
                 if let entry = model.selectedEntry {
                     ColumnResizer(width: $editorWidth, range: 360...760)
+                    // Keyed by file, not by list position, so a reload that
+                    // reorders the list keeps the editor and its edits.
                     EditorView(entry: entry)
-                        .id(entry.id)
+                        .id(entry.agent.rawValue + entry.url.path)
                         .frame(width: editorWidth)
                         .background(.background)
                 }
@@ -36,6 +38,19 @@ struct ContentView: View {
             $0.disablesAnimations = true
         }
         .background(WindowReader(window: $window))
+        .alert("Discard unsaved changes?", isPresented: Binding(
+            get: { model.pendingDiscard != nil }, set: { if !$0 { model.pendingDiscard = nil } }
+        )) {
+            Button("Discard", role: .destructive) {
+                let action = model.pendingDiscard
+                model.pendingDiscard = nil
+                model.hasUnsavedEdits = false
+                action?()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The file in the editor has edits that aren’t saved yet.")
+        }
         .onChange(of: model.selectedEntry != nil) { _, open in
             resizeForEditor(open: open)
         }
@@ -127,8 +142,10 @@ struct Sidebar: View {
     @State private var showHidden = false
 
     var body: some View {
-        @Bindable var model = model
-        List(selection: $model.selection) {
+        // Leaving the page closes the editor, so ask first about unsaved edits.
+        List(selection: Binding(get: { model.selection }, set: { place in
+            model.whenEditsAreSafe { model.selection = place }
+        })) {
             Label("Global", systemImage: "globe").tag(Place.global)
             Section("Projects") {
                 ForEach(model.projects, id: \.url) { project in

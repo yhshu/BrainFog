@@ -151,7 +151,7 @@ public enum SkillResolver {
     /// Top-level `key: value` pairs of the YAML frontmatter, including
     /// folded (`>`) and literal (`|`) blocks.
     static func frontmatter(_ text: String) -> [String: String] {
-        let lines = text.components(separatedBy: "\n")
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return [:] }
         var result: [String: String] = [:]
         var key: String?

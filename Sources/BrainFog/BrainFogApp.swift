@@ -12,6 +12,7 @@ struct BrainFogApp: App {
         WindowGroup("BrainFog") {
             ContentView()
                 .environment(model)
+                .onAppear { delegate.model = model }
                 .frame(minWidth: 1100, minHeight: 680)
         }
         .windowToolbarStyle(.unified)
@@ -30,6 +31,19 @@ struct BrainFogApp: App {
 /// A SwiftPM executable starts as a background process; make it a regular
 /// foreground app with a Dock icon and focused window.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+
+    /// Quitting with the editor dirty asks first, like closing it does.
+    @MainActor func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model?.hasUnsavedEdits == true, NSApp.windows.contains(where: \.isVisible) else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Discard unsaved changes?"
+        alert.informativeText = "The file in the editor has edits that aren’t saved yet."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Discard and Quit").hasDestructiveAction = true
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()

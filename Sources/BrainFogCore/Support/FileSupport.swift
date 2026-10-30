@@ -58,9 +58,11 @@ enum FileSupport {
     }
 
     /// Recursively lists regular files below `dir`, skipping heavy or hidden
-    /// directories, up to `maxDepth` levels and `limit` results.
+    /// directories, up to `maxDepth` levels and `limit` results. Only files
+    /// passing `include` count toward the limit, so a search for a few names
+    /// is not cut short by a large tree.
     static func walk(_ dir: URL, maxDepth: Int = 6, limit: Int = 2000,
-                     skipHidden: Bool = true) -> [URL] {
+                     skipHidden: Bool = true, include: (URL) -> Bool = { _ in true }) -> [URL] {
         let skip: Set<String> = ["node_modules", ".git", ".build", "build", "DerivedData",
                                  "Pods", ".venv", "venv", "__pycache__", "dist", "target"]
         var result: [URL] = []
@@ -75,7 +77,7 @@ enum FileSupport {
                 // bound stops cycles.
                 if isDirectory(child) {
                     if !skip.contains(child.lastPathComponent) { visit(child, depth: depth + 1) }
-                } else {
+                } else if include(child) {
                     result.append(child.standardizedFileURL)
                 }
             }
@@ -102,7 +104,8 @@ enum Frontmatter {
     /// when there is none.
     static func split(_ text: String) -> (yaml: String?, body: String) {
         guard text.hasPrefix("---\n") || text.hasPrefix("---\r\n") else { return (nil, text) }
-        let lines = text.components(separatedBy: "\n")
+        // Windows line endings would leave a \r on every key and on the closing ---.
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         guard let end = lines.dropFirst().firstIndex(where: {
             $0.trimmingCharacters(in: .whitespaces) == "---"
         }) else { return (nil, text) }
@@ -233,7 +236,31 @@ enum JSONC {
             }
             i = text.index(after: i)
         }
-        let cleaned = out.replacingOccurrences(of: #",\s*([}\]])"#, with: "$1", options: .regularExpression)
-        return (try? JSONSerialization.jsonObject(with: Data(cleaned.utf8))) as? [String: Any]
+        return (try? JSONSerialization.jsonObject(with: Data(dropTrailingCommas(out).utf8))) as? [String: Any]
+    }
+
+    /// Removes a comma that only whitespace separates from a closing } or ],
+    /// leaving string contents alone.
+    private static func dropTrailingCommas(_ text: String) -> String {
+        let chars = Array(text)
+        var out = ""
+        var inString = false
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if inString {
+                if c == "\\", i + 1 < chars.count { out.append(c); out.append(chars[i + 1]); i += 2; continue }
+                if c == "\"" { inString = false }
+            } else if c == "\"" {
+                inString = true
+            } else if c == "," {
+                var j = i + 1
+                while j < chars.count, chars[j].isWhitespace { j += 1 }
+                if j < chars.count, chars[j] == "}" || chars[j] == "]" { i += 1; continue }
+            }
+            out.append(c)
+            i += 1
+        }
+        return out
     }
 }

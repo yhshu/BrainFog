@@ -34,7 +34,9 @@ public struct CursorResolver: ContextResolver {
         }
 
         // 4. Nested rules and AGENTS.md apply when working in their folder.
-        for url in FileSupport.walk(cwd, maxDepth: 6, skipHidden: false) {
+        for url in FileSupport.walk(cwd, maxDepth: 6, skipHidden: false, include: {
+            $0.lastPathComponent == "AGENTS.md" || $0.path.contains("/.cursor/rules/")
+        }) {
             let parts = url.pathComponents.dropFirst(cwd.pathComponents.count)
             if parts.count > 1, parts.last == "AGENTS.md", !parts.contains(where: { $0.hasPrefix(".") }) {
                 let folder = parts.dropLast().joined(separator: "/")

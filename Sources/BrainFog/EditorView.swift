@@ -26,7 +26,7 @@ struct EditorView: View {
                     Text(entry.url.lastPathComponent).font(.headline)
                     ScopeChip(scope: entry.scope)
                     Spacer()
-                    Button("Close", systemImage: "xmark") { model.selectedEntry = nil }
+                    Button("Close", systemImage: "xmark") { model.whenEditsAreSafe { model.selectedEntry = nil } }
                         .labelStyle(.iconOnly).buttonStyle(.borderless)
                         .keyboardShortcut(.cancelAction)
                         .help("Close the editor (Esc)")
@@ -51,6 +51,8 @@ struct EditorView: View {
                 .disabled(!entry.url.isFileURL)
         }
         .task { load() }
+        .onChange(of: isDirty, initial: true) { model.hasUnsavedEdits = isDirty }
+        .onDisappear { model.hasUnsavedEdits = false }
         .task(id: text) {
             // Auto save a moment after typing stops.
             guard autoSave, isDirty else { return }

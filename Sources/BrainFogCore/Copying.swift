@@ -17,6 +17,9 @@ public struct CopyPlan: Sendable, Equatable {
     /// Frontmatter written ahead of the text of a new file; any the source
     /// had is dropped.
     public var header = ""
+    /// File patterns the source was limited to (Claude `paths`, Cursor
+    /// `globs`) that the target can't express, so the copy applies everywhere.
+    public var lostScope: [String] = []
 
     /// - Parameters:
     ///   - project: the project folder, or nil for the global layer.
@@ -24,6 +27,10 @@ public struct CopyPlan: Sendable, Equatable {
     /// Nil when the agent has no file for that layer (Cursor's global rules).
     public init?(source: URL, to agent: AgentID, project: URL?, from: AgentID?,
                 environment env: ResolverEnvironment = .init()) {
+        let yaml = Frontmatter.split(FileSupport.read(source) ?? "").yaml ?? ""
+        let scope = (Frontmatter.list("paths", in: yaml) + Frontmatter.list("globs", in: yaml))
+            .flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+            .filter { !$0.isEmpty }
         switch agent {
         case .claudeCode:
             // Rule files load at launch unless they declare `paths`, so a
@@ -35,6 +42,9 @@ public struct CopyPlan: Sendable, Equatable {
             destination = Self.unused(rules.appendingPathComponent(name))
             mode = .newFile
             sharedWith = []
+            if !scope.isEmpty {
+                header = "---\npaths:\n" + scope.map { "  - \"\($0)\"\n" }.joined() + "---\n\n"
+            }
         case .codex:
             let dir = project ?? env.variables["CODEX_HOME"].map {
                 URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
@@ -46,13 +56,15 @@ public struct CopyPlan: Sendable, Equatable {
             } ?? false
             destination = hasOverride ? override : dir.appendingPathComponent("AGENTS.md")
             mode = .append
-            sharedWith = project != nil && !hasOverride ? [.openCode, .cursor] : []
+            sharedWith = project.map { hasOverride ? [] : Self.othersReadingAgents($0, env: env, except: .codex) } ?? []
+            lostScope = scope
         case .openCode:
             let dir = project ?? (env.variables["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }
                 ?? env.home.appendingPathComponent(".config")).appendingPathComponent("opencode")
             destination = dir.appendingPathComponent("AGENTS.md")
             mode = .append
-            sharedWith = project != nil ? [.codex, .cursor] : []
+            sharedWith = project.map { Self.othersReadingAgents($0, env: env, except: .openCode) } ?? []
+            lostScope = scope
         case .cursor:
             // An always-applied rule, so a copy never has to edit AGENTS.md.
             guard let project else { return nil }
@@ -61,8 +73,23 @@ public struct CopyPlan: Sendable, Equatable {
             destination = Self.unused(project.appendingPathComponent(".cursor/rules/\(name).mdc"))
             mode = .newFile
             sharedWith = []
-            header = "---\ndescription: Copied from \(source.lastPathComponent)\nalwaysApply: true\n---\n\n"
+            header = scope.isEmpty
+                ? "---\ndescription: Copied from \(source.lastPathComponent)\nalwaysApply: true\n---\n\n"
+                : "---\ndescription: Copied from \(source.lastPathComponent)\nglobs: \(scope.joined(separator: ", "))\nalwaysApply: false\n---\n\n"
         }
+    }
+
+    /// Agents besides `agent` that read `<project>/AGENTS.md`.
+    private static func othersReadingAgents(_ project: URL, env: ResolverEnvironment, except agent: AgentID) -> [AgentID] {
+        var agents: [AgentID] = []
+        if ClaudeCodeResolver.claudeFiles(above: project, home: env.home).isEmpty { agents.append(.claudeCode) }
+        let override = project.appendingPathComponent("AGENTS.override.md")
+        let codexOverridden = FileSupport.read(override).map {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? false
+        if !codexOverridden { agents.append(.codex) }
+        agents += [.openCode, .cursor]
+        return agents.filter { $0 != agent }
     }
 
     /// Carries the copy out. Never overwrites: new files get a free name and
@@ -78,7 +105,10 @@ public struct CopyPlan: Sendable, Equatable {
             var existing = FileSupport.read(destination) ?? ""
             if !existing.isEmpty && !existing.hasSuffix("\n") { existing += "\n" }
             let separator = existing.isEmpty ? "" : "\n"
-            let body = text.hasSuffix("\n") ? text : text + "\n"
+            // Frontmatter means nothing in the middle of AGENTS.md.
+            var body = Frontmatter.split(text).body
+            if body.hasPrefix("\n") { body.removeFirst() }
+            if !body.hasSuffix("\n") { body += "\n" }
             try (existing + separator + "<!-- Copied from \(source.path) -->\n" + body)
                 .write(to: destination, atomically: true, encoding: .utf8)
         }

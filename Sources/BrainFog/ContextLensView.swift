@@ -255,11 +255,10 @@ struct AgentSection: View {
         ForEach(options) { option in
             Button {
                 if option.needsName {
-                    ask(project != nil && !isInProject(option.url) ? "New Global Rule File" : "New Rule File") {
-                        try option.create(name: $0)
-                    }
+                    let title = project != nil && !isInProject(option.url) ? "New Global Rule File" : "New Rule File"
+                    model.whenEditsAreSafe { ask(title) { try option.create(name: $0) } }
                 } else {
-                    create { try option.create() }
+                    model.whenEditsAreSafe { create { try option.create() } }
                 }
             } label: {
                 Text(option.title + (option.exists ? " (already exists)" : ""))
@@ -278,7 +277,7 @@ struct AgentSection: View {
 
     private func skillButton(_ title: String, detail: String, project: URL?) -> some View {
         Button {
-            ask(project == nil ? "New Global Skill" : "New Project Skill") { name in
+            model.whenEditsAreSafe { ask(project == nil ? "New Global Skill" : "New Project Skill") { name in
                 // The name becomes a folder, so it must be a single path component.
                 let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.contains("/"), !name.hasPrefix(".") else {
@@ -292,7 +291,7 @@ struct AgentSection: View {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 try SkillResolver.template(name: name).write(to: file, atomically: true, encoding: .utf8)
                 return file
-            }
+            } }
         } label: {
             Text(title)
             Text(detail)
@@ -435,7 +434,12 @@ struct AgentSection: View {
             ? "It will be saved as a new file, \(path), which \(context.agent.displayName) reads at the start of every session."
             : "Its text will be added to the end of \(path), which \(context.agent.displayName) reads at the start of every session."
         if !plan.sharedWith.isEmpty {
-            text += " \(plan.sharedWith.map(\.displayName).joined(separator: " and ")) reads this file too."
+            let names = plan.sharedWith.map(\.displayName)
+            let list = names.count > 1 ? names.dropLast().joined(separator: ", ") + " and " + names.last! : names[0]
+            text += " \(list) \(names.count > 1 ? "read" : "reads") this file too."
+        }
+        if !plan.lostScope.isEmpty {
+            text += " The original applies only to \(plan.lostScope.joined(separator: ", ")); \(context.agent.displayName) can’t limit it that way, so the copy applies to every file."
         }
         return text + " The original file is not changed."
     }
@@ -481,7 +485,8 @@ struct SkillRow: View {
 
     var body: some View {
         Button {
-            model.selectedEntry = isSelected ? nil : skill.entry
+            let next = isSelected ? nil : skill.entry
+            model.whenEditsAreSafe { model.selectedEntry = next }
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -599,7 +604,8 @@ struct EntryCard: View {
 
     var body: some View {
         Button {
-            model.selectedEntry = isSelected ? nil : entry
+            let next = isSelected ? nil : entry
+            model.whenEditsAreSafe { model.selectedEntry = next }
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: entry.scope.symbol)

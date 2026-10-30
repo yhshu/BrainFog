@@ -32,8 +32,12 @@ public struct CodexResolver: ContextResolver {
         for dir in chain {
             for name in names {
                 let url = dir.appendingPathComponent(name)
-                guard FileSupport.isFile(url), let text = FileSupport.read(url),
-                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                guard FileSupport.isFile(url), let text = FileSupport.read(url) else { continue }
+                // Codex passes over an empty file; list it so it can still be opened.
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    list.add(url, scope: .project, timing: .skipped("empty file"))
+                    continue
+                }
                 let note = dir.path == cwd.path ? nil : "parent directory"
                 if budget <= 0 {
                     list.add(url, scope: .project, timing: .skipped("over project_doc_max_bytes (\(config.maxBytes) bytes)"))
@@ -95,7 +99,7 @@ struct CodexConfig {
         var section = ""
         var pendingArray: String?
         for raw in text.components(separatedBy: "\n") {
-            let line = raw.components(separatedBy: "#").first!.trimmingCharacters(in: .whitespaces)
+            let line = Self.stripComment(raw).trimmingCharacters(in: .whitespaces)
             if var acc = pendingArray {
                 acc += line
                 if line.contains("]") { fallbackFilenames = Self.strings(acc); pendingArray = nil }
@@ -116,6 +120,23 @@ struct CodexConfig {
             default: break
             }
         }
+    }
+
+    /// Drops a `#` comment, but not a `#` inside a quoted string.
+    private static func stripComment(_ line: String) -> String {
+        var quote: Character?
+        var escaped = false
+        for (i, c) in zip(line.indices, line) {
+            if escaped { escaped = false; continue }
+            if let q = quote {
+                if c == "\\" && q == "\"" { escaped = true } else if c == q { quote = nil }
+            } else if c == "\"" || c == "'" {
+                quote = c
+            } else if c == "#" {
+                return String(line[..<i])
+            }
+        }
+        return line
     }
 
     private static func strings(_ s: String) -> [String] {

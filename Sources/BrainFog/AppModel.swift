@@ -30,6 +30,10 @@ final class AppModel {
     var contexts: [ResolvedContext] = []
     var selectedEntry: ContextEntry?
     var isResolving = false
+    /// The editor has text that isn't on disk yet.
+    var hasUnsavedEdits = false
+    /// What to do once the user agrees to drop unsaved edits.
+    var pendingDiscard: (() -> Void)?
 
     private let addedKey = "addedProjects"
     private let hiddenKey = "hiddenProjects"
@@ -55,6 +59,12 @@ final class AppModel {
         let hidden = Set(UserDefaults.standard.stringArray(forKey: hiddenKey) ?? [])
         projects = list.filter { !hidden.contains($0.url.path) }
         hiddenProjects = list.filter { hidden.contains($0.url.path) }
+    }
+
+    /// Runs `action`, which closes or replaces the editor, right away, or
+    /// after the user confirms dropping unsaved edits.
+    func whenEditsAreSafe(_ action: @escaping () -> Void) {
+        if hasUnsavedEdits { pendingDiscard = action } else { action() }
     }
 
     func setHidden(_ url: URL, _ hide: Bool) {
@@ -102,7 +112,10 @@ final class AppModel {
             isResolving = false
             if let current = selectedEntry {
                 let all = result.flatMap { $0.entries + $0.skills.map(\.entry) }
+                // A file the agent doesn't list (say, an empty one it skips)
+                // stays open as long as it exists.
                 selectedEntry = all.first { $0.url == current.url && $0.agent == current.agent }
+                    ?? (FileManager.default.fileExists(atPath: current.url.path) ? current : nil)
             }
         }
     }
@@ -119,16 +132,22 @@ final class AppModel {
             // Resolve from an empty folder so only machine-wide layers remain.
             let probe = FileManager.default.temporaryDirectory.appendingPathComponent("brainfog-global-probe")
             try? FileManager.default.createDirectory(at: probe, withIntermediateDirectories: true)
-            let claudeHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path
+            let claudeHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path + "/"
             return Resolvers.resolveAll(workingDirectory: probe).map { ctx in
                 var ctx = ctx
+                // Imports come right after the file that pulls them in, so one
+                // pass keeps every import of a kept file, wherever it lives.
+                var kept = Set<String>()
                 ctx.entries = ctx.entries.filter { e in
-                    switch e.scope {
+                    let keep = switch e.scope {
                     case .managed, .user: true
-                    case .rule, .imported: e.url.path.hasPrefix(claudeHome)
+                    case .rule: e.url.path.hasPrefix(claudeHome)
+                    case .imported: e.importedBy.map { kept.contains($0.path) } ?? false
                     case .autoMemory: e.agent == .codex
                     default: false
                     }
+                    if keep { kept.insert(e.url.path) }
+                    return keep
                 }
                 ctx.skills = SkillResolver.resolve(agent: ctx.agent, workingDirectory: nil)
                 ctx.diagnostics = ctx.diagnostics.filter { !$0.message.contains("Not a git repository") }

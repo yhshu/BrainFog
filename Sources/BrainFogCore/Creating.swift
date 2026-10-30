@@ -74,8 +74,13 @@ public struct NewFileOption: Identifiable, Sendable, Hashable {
         var file = url
         if needsName {
             var n = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !n.lowercased().hasSuffix("." + fileExtension) { n += "." + fileExtension }
-            file = url.appendingPathComponent(n)
+            // The agents match the extension exactly, so `Style.MD` becomes `Style.md`.
+            if n.lowercased().hasSuffix("." + fileExtension) { n = String(n.dropLast(fileExtension.count + 1)) }
+            // A single file name inside the rules folder, never a path out of it.
+            guard !n.isEmpty, !n.contains("/"), !n.contains(":"), !n.hasPrefix(".") else {
+                throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: name ?? ""])
+            }
+            file = url.appendingPathComponent(n + "." + fileExtension)
         }
         if FileManager.default.fileExists(atPath: file.path) {
             throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: file.path])

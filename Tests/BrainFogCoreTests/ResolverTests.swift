@@ -278,7 +278,8 @@ final class Sandbox {
 
         try s.write("AGENTS.md", "existing", in: s.project)
         let toCodex = try #require(CopyPlan(source: source, to: .codex, project: s.project, from: .claudeCode, environment: s.env()))
-        #expect(toCodex.mode == .append && toCodex.sharedWith == [.openCode, .cursor])
+        // No CLAUDE.md here, so Claude Code reads AGENTS.md too.
+        #expect(toCodex.mode == .append && toCodex.sharedWith == [.claudeCode, .openCode, .cursor])
         try toCodex.apply(text: "remember this", source: source)
         let agents = try String(contentsOf: s.project.appendingPathComponent("AGENTS.md"), encoding: .utf8)
         #expect(agents.hasPrefix("existing\n\n<!-- Copied from ") && agents.hasSuffix("remember this\n"))
@@ -286,16 +287,17 @@ final class Sandbox {
         let global = CopyPlan(source: source, to: .openCode, project: nil, from: nil, environment: s.env())
         #expect(global?.destination.path == s.home.appendingPathComponent(".config/opencode/AGENTS.md").path)
 
-        // Cursor gets an always-applied rule; it has no global rule file.
+        // Cursor gets a rule limited to the same files; it has no global rule file.
         try s.write("style.md", "---\npaths: [\"*.swift\"]\n---\nUse tabs.\n", in: s.project)
         let style = s.project.appendingPathComponent("style.md")
         let toCursor = try #require(CopyPlan(source: style, to: .cursor, project: s.project, from: .claudeCode, environment: s.env()))
         #expect(toCursor.destination.path.hasSuffix("app/.cursor/rules/claudeCode-style.mdc"))
         try toCursor.apply(text: FileSupport.read(style)!, source: style)
         let written = try String(contentsOf: toCursor.destination, encoding: .utf8)
-        #expect(!written.contains("paths:") && written.hasSuffix("Use tabs.\n"))
+        #expect(!written.contains("paths:") && written.contains("globs: *.swift") && written.hasSuffix("Use tabs.\n"))
         let cursor = CursorResolver().resolve(workingDirectory: s.project, environment: s.env())
-        #expect(s.names(cursor).contains("~/code/app/.cursor/rules/claudeCode-style.mdc"))
+        #expect(cursor.entries.first { $0.url == toCursor.destination }?.timing
+            == .onDemand("when files matching *.swift are in context"))
         #expect(CopyPlan(source: style, to: .cursor, project: nil, from: nil, environment: s.env()) == nil)
     }
 }
