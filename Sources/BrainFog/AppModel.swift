@@ -24,12 +24,16 @@ enum Place: Hashable, Identifiable {
 @MainActor @Observable
 final class AppModel {
     var projects: [ProjectDiscovery.Project] = []
+    /// Projects the user hid from the sidebar; kept so they can be shown again.
+    var hiddenProjects: [ProjectDiscovery.Project] = []
     var selection: Place? = .global
     var contexts: [ResolvedContext] = []
     var selectedEntry: ContextEntry?
     var isResolving = false
 
     private let addedKey = "addedProjects"
+    private let hiddenKey = "hiddenProjects"
+    private let removedKey = "removedProjects"
     private var resolveTask: Task<Void, Never>?
 
     init() {
@@ -43,17 +47,45 @@ final class AppModel {
             .map { URL(fileURLWithPath: $0) }
             .filter { url in !list.contains { $0.url == url } }
         list += added.map { ProjectDiscovery.Project(url: $0, knownBy: []) }
-        projects = list.sorted {
+        list.sort {
             $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending
         }
+        let removed = Set(UserDefaults.standard.stringArray(forKey: removedKey) ?? [])
+        list.removeAll { removed.contains($0.url.path) }
+        let hidden = Set(UserDefaults.standard.stringArray(forKey: hiddenKey) ?? [])
+        projects = list.filter { !hidden.contains($0.url.path) }
+        hiddenProjects = list.filter { hidden.contains($0.url.path) }
+    }
+
+    func setHidden(_ url: URL, _ hide: Bool) {
+        var hidden = UserDefaults.standard.stringArray(forKey: hiddenKey) ?? []
+        hidden.removeAll { $0 == url.path }
+        if hide { hidden.append(url.path) }
+        UserDefaults.standard.set(hidden, forKey: hiddenKey)
+        if hide, selection == .project(url) { selection = .global }
+        reloadProjects()
+    }
+
+    /// Drops a project from BrainFog without touching its files. Discovered
+    /// projects stay out until the user adds them again.
+    func removeProject(_ url: URL) {
+        let defaults = UserDefaults.standard
+        defaults.set((defaults.stringArray(forKey: addedKey) ?? []).filter { $0 != url.path }, forKey: addedKey)
+        defaults.set((defaults.stringArray(forKey: hiddenKey) ?? []).filter { $0 != url.path }, forKey: hiddenKey)
+        defaults.set((defaults.stringArray(forKey: removedKey) ?? []).filter { $0 != url.path } + [url.path], forKey: removedKey)
+        if selection == .project(url) { selection = .global }
+        reloadProjects()
     }
 
     func addProject(_ url: URL) {
-        var added = UserDefaults.standard.stringArray(forKey: addedKey) ?? []
+        let url = url.standardizedFileURL
+        let defaults = UserDefaults.standard
+        defaults.set((defaults.stringArray(forKey: removedKey) ?? []).filter { $0 != url.path }, forKey: removedKey)
+        var added = defaults.stringArray(forKey: addedKey) ?? []
         if !added.contains(url.path) { added.append(url.path) }
-        UserDefaults.standard.set(added, forKey: addedKey)
-        reloadProjects()
-        selection = .project(url.standardizedFileURL)
+        defaults.set(added, forKey: addedKey)
+        setHidden(url, false)
+        selection = .project(url)
     }
 
     /// Re-runs every resolver for the selected place off the main actor.
@@ -69,7 +101,8 @@ final class AppModel {
             contexts = result
             isResolving = false
             if let current = selectedEntry {
-                selectedEntry = result.flatMap(\.entries).first { $0.url == current.url && $0.agent == current.agent }
+                let all = result.flatMap { $0.entries + $0.skills.map(\.entry) }
+                selectedEntry = all.first { $0.url == current.url && $0.agent == current.agent }
             }
         }
     }
@@ -77,7 +110,11 @@ final class AppModel {
     nonisolated private static func contexts(for place: Place) -> [ResolvedContext] {
         switch place {
         case .project(let url):
-            return Resolvers.resolveAll(workingDirectory: url)
+            return Resolvers.resolveAll(workingDirectory: url).map { ctx in
+                var ctx = ctx
+                ctx.skills = SkillResolver.resolve(agent: ctx.agent, workingDirectory: url)
+                return ctx
+            }
         case .global:
             // Resolve from an empty folder so only machine-wide layers remain.
             let probe = FileManager.default.temporaryDirectory.appendingPathComponent("brainfog-global-probe")
@@ -93,7 +130,8 @@ final class AppModel {
                     default: false
                     }
                 }
-                ctx.diagnostics = ctx.diagnostics.filter { !$0.message.contains("No git root") }
+                ctx.skills = SkillResolver.resolve(agent: ctx.agent, workingDirectory: nil)
+                ctx.diagnostics = ctx.diagnostics.filter { !$0.message.contains("Not a git repository") }
                 return ctx
             }
         }

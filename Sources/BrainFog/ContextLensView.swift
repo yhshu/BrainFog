@@ -2,19 +2,26 @@ import AppKit
 import SwiftUI
 import BrainFogCore
 
-/// Side-by-side view of what each agent loads for the selected place.
+enum LensMode: String, CaseIterable {
+    case context, skills
+    var title: String { self == .context ? "Instructions & Memory" : "Skills" }
+    var symbol: String { self == .context ? "text.book.closed" : "puzzlepiece.extension" }
+}
+
+/// What each agent loads for the selected place, one section per agent.
 struct ContextLensView: View {
     @Environment(AppModel.self) private var model
-    @State private var showOnDemand = true
+    @AppStorage("lensMode") private var mode = LensMode.context
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                // One full-width section per agent, stacked top to bottom.
                 GlassEffectContainer(spacing: 16) {
-                    HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 16) {
                         ForEach(model.contexts, id: \.agent) { ctx in
-                            AgentColumn(context: ctx, showOnDemand: showOnDemand)
+                            AgentSection(context: ctx, mode: mode)
                         }
                     }
                 }
@@ -24,34 +31,48 @@ struct ContextLensView: View {
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(backdrop)
         .navigationTitle(model.selection?.title ?? "BrainFog")
-        .navigationSubtitle(subtitle)
+        .toolbar(removing: .title)
         .toolbar {
-            ToolbarItemGroup {
-                Toggle(isOn: $showOnDemand) {
-                    Label("Show on-demand and unloaded", systemImage: "line.3.horizontal.decrease")
+            ToolbarItem(placement: .principal) {
+                Picker("View", selection: $mode) {
+                    ForEach(LensMode.allCases, id: \.self) {
+                        Label($0.title, systemImage: $0.symbol).help($0.title).tag($0)
+                    }
                 }
-                .help("Show files loaded on demand and files not loaded (shadowed or cut off)")
-                Button("Rescan", systemImage: "arrow.clockwise") { model.resolve() }
+                .pickerStyle(.segmented)
+                .labelStyle(.iconOnly)
+                .fixedSize()
             }
+        }
+    }
+
+    private var description: String {
+        switch (mode, model.selection == .global) {
+        case (.context, true): "Instructions and memory every agent reads in every project."
+        case (.context, false): "What each agent reads when started in this folder, in the order it enters the context."
+        case (.skills, true): "Skills available to each agent in every project."
+        case (.skills, false): "Skills each agent can use when started in this folder, including global ones."
         }
     }
 
     private var subtitle: String {
         if case .project(let url) = model.selection { return url.path }
-        return "Instructions and memory shared by every project"
+        return "Your home folder settings for Claude Code, Codex, OpenCode, and Cursor"
     }
 
     @ViewBuilder private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(model.selection == .global ? "Global layer" : "Launch context")
+            Text(model.selection?.title ?? "BrainFog")
                 .font(.largeTitle.weight(.semibold))
             if model.isResolving { ProgressView().controlSize(.small) }
             Spacer()
         }
-        Text(model.selection == .global
-             ? "These files apply in every project."
-             : "What each agent reads when started in this folder, in the order it enters the context.")
-            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(description)
+                .foregroundStyle(.secondary)
+            Text(subtitle).font(.caption).foregroundStyle(.tertiary)
+                .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+        }
     }
 
     /// Soft agent-colored glow behind the glass so it has something to refract.
@@ -63,57 +84,419 @@ struct ContextLensView: View {
                     .fill(agent.tint.opacity(0.18))
                     .frame(width: 520, height: 520)
                     .blur(radius: 120)
-                    .offset(x: CGFloat(i - 1) * 380, y: -160)
+                    .offset(x: (CGFloat(i) - CGFloat(AgentID.allCases.count - 1) / 2) * 380, y: -160)
             }
         }
         .ignoresSafeArea()
     }
 }
 
-struct AgentColumn: View {
+struct AgentSection: View {
     @Environment(AppModel.self) private var model
+    @State private var showUnused = false
+    @State private var isDropTarget = false
+    @State private var pendingCopy: PendingCopy?
+    @State private var copyError: String?
+    @State private var namePrompt: NamePrompt?
+    @State private var newName = ""
     let context: ResolvedContext
-    let showOnDemand: Bool
+    let mode: LensMode
+
+    /// Asks for a name before creating a rule file or a skill.
+    struct NamePrompt {
+        var title: String
+        var create: (String) throws -> URL
+    }
+
+    struct PendingCopy {
+        var source: URL
+        var plan: CopyPlan
+    }
 
     private var launched: [ContextEntry] { context.entries.filter { $0.timing.isLoadedAtLaunch } }
-    private var deferred: [ContextEntry] { context.entries.filter { !$0.timing.isLoadedAtLaunch } }
+    private var onDemand: [ContextEntry] {
+        context.entries.filter { if case .onDemand = $0.timing { true } else { false } }
+    }
+    private var unused: [ContextEntry] {
+        context.entries.filter { if case .skipped = $0.timing { true } else { false } }
+    }
+    private func notes(_ topic: Diagnostic.Topic) -> [Diagnostic] {
+        context.diagnostics.filter { $0.severity == .info && $0.topic == topic }
+    }
+
+    private var project: URL? {
+        if case .project(let url) = model.selection { return url }
+        return nil
+    }
+
+    /// Agents whose sections are folded, kept across launches as
+    /// comma-separated raw values.
+    @AppStorage("collapsedAgents") private var collapsedAgents = ""
+
+    private var hasItems: Bool { mode == .context ? !context.entries.isEmpty : !context.skills.isEmpty }
+    private var isCollapsed: Bool { hasItems && collapsedAgents.split(separator: ",").contains(Substring(context.agent.rawValue)) }
+
+    private func toggleCollapsed() {
+        var set = Set(collapsedAgents.split(separator: ",").map(String.init))
+        if set.remove(context.agent.rawValue) == nil { set.insert(context.agent.rawValue) }
+        withAnimation { collapsedAgents = set.sorted().joined(separator: ",") }
+    }
+
+    /// What a folded section still says about itself.
+    private var summary: String {
+        if mode == .skills {
+            let n = context.skills.count
+            return "\(n) \(n == 1 ? "skill" : "skills")"
+        }
+        let n = context.entries.count
+        return "\(n) \(n == 1 ? "file" : "files") · about \(context.launchTokens.tokenLabel) tokens at launch"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Image(systemName: context.agent.symbol)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(context.agent.tint)
-                    .frame(width: 34, height: 34)
-                    .glassEffect(.regular.tint(context.agent.tint.opacity(0.25)), in: .circle)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(context.agent.displayName).font(.headline)
-                    Text("\(launched.count) \(launched.count == 1 ? "file" : "files") · ≈\(context.launchTokens.tokenLabel) tokens")
-                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Button(action: toggleCollapsed) {
+                    HStack(spacing: 10) {
+                        AgentIcon(agent: context.agent)
+                        Text(context.agent.displayName).font(.title3.weight(.semibold))
+                        if hasItems {
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                        }
+                        if isCollapsed {
+                            Text(summary).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(.rect)
                 }
-                Spacer()
+                .buttonStyle(.plain)
+                .allowsHitTesting(hasItems)
+                .help(isCollapsed ? "Show \(context.agent.displayName)’s files" : "Fold \(context.agent.displayName)’s section")
+                if mode == .skills || !newFileOptions.isEmpty { addMenu }
             }
-
-            TokenBar(entries: launched, tint: context.agent.tint)
-
-            if launched.isEmpty {
-                Text("No instruction files load at launch")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 60)
+            if !isCollapsed {
+                if mode == .context { contextGroups } else { skillGroups }
             }
-            ForEach(launched) { EntryCard(entry: $0) }
-
-            if showOnDemand && !deferred.isEmpty {
-                Text("On demand / not loaded").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .padding(.top, 6)
-                ForEach(deferred) { EntryCard(entry: $0) }
-            }
-
-            ForEach(context.diagnostics) { DiagnosticRow(diagnostic: $0) }
+            ForEach(context.diagnostics.filter { $0.severity != .info }) { DiagnosticRow(diagnostic: $0) }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
+        .modifier(SectionChrome(agent: context.agent, isDropTarget: isDropTarget))
+        .dropDestination(for: URL.self) { urls, _ in
+            mode == .context && prepareCopy(urls)
+        } isTargeted: { isDropTarget = $0 && mode == .context }
+        .confirmationDialog(copyTitle, isPresented: Binding(
+            get: { pendingCopy != nil }, set: { if !$0 { pendingCopy = nil } }
+        ), titleVisibility: .visible) {
+            Button("Copy") { performCopy() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(copyMessage)
+        }
+        .alert(namePrompt?.title ?? "", isPresented: Binding(
+            get: { namePrompt != nil }, set: { if !$0 { namePrompt = nil } }
+        )) {
+            TextField("Name", text: $newName)
+            Button("Create") { if let prompt = namePrompt { create { try prompt.create(newName) } } }
+                .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Couldn’t do that", isPresented: Binding(
+            get: { copyError != nil }, set: { if !$0 { copyError = nil } }
+        )) {} message: {
+            Text(copyError ?? "")
+        }
+    }
+
+    // MARK: Creating files
+
+    /// Nothing to offer for a layer the agent keeps outside files (Cursor's
+    /// global rules), so the menu is hidden then.
+    private var newFileOptions: [NewFileOption] {
+        NewFileOption.options(for: context.agent, project: project)
+    }
+
+    /// "+" menu: new instruction files where this agent reads them, or a new skill.
+    private var addMenu: some View {
+        Menu {
+            if mode == .context {
+                ForEach(newFileOptions) { option in
+                    Button {
+                        if option.needsName {
+                            ask("New Rule File") { try option.create(name: $0) }
+                        } else {
+                            create { try option.create() }
+                        }
+                    } label: {
+                        Text(option.title + (option.exists ? " (already exists)" : ""))
+                        Text(option.detail)
+                    }
+                    .disabled(option.exists)
+                }
+            } else {
+                Button("New Skill…") {
+                    ask("New Skill") { name in
+                        // The name becomes a folder, so it must be a single path component.
+                        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !name.contains("/"), !name.hasPrefix(".") else {
+                            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: name])
+                        }
+                        let folder = SkillResolver.newSkillFolder(named: name, agent: context.agent, project: project)
+                        let file = folder.appendingPathComponent("SKILL.md")
+                        if FileManager.default.fileExists(atPath: file.path) {
+                            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: file.path])
+                        }
+                        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                        try SkillResolver.template(name: name).write(to: file, atomically: true, encoding: .utf8)
+                        return file
+                    }
+                }
+            }
+        } label: {
+            Label("New", systemImage: "plus")
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(mode == .context ? "Create an instruction file \(context.agent.displayName) reads"
+                               : "Create a skill for \(context.agent.displayName)")
+    }
+
+    private func ask(_ title: String, _ create: @escaping (String) throws -> URL) {
+        newName = ""
+        namePrompt = NamePrompt(title: title, create: create)
+    }
+
+    /// Creates the file, then opens it in the editor.
+    private func create(_ make: () throws -> URL) {
+        do {
+            let url = try make()
+            model.selectedEntry = ContextEntry(agent: context.agent, url: url.standardizedFileURL,
+                                               scope: project == nil ? .user : .project, timing: .launch)
+            model.resolve()
+        } catch {
+            copyError = error.localizedDescription
+        }
+    }
+
+    // MARK: Instructions & memory
+
+    /// Three groups, each answering one question: what is read at the start
+    /// of every session, what is read only when relevant, and what is ignored.
+    @ViewBuilder private var contextGroups: some View {
+        GroupHeader(title: "Every session",
+                    detail: launched.isEmpty ? "no files"
+                        : "\(launched.count) \(launched.count == 1 ? "file" : "files") · about \(context.launchTokens.tokenLabel) tokens")
+            .help("Read in full at the start of every session. \(tokenHelp)")
+        TokenBar(entries: launched, tint: context.agent.tint)
+        ForEach(launched) { EntryCard(entry: $0) }
+        ForEach(notes(.launch)) { NoteText(text: $0.message) }
+
+        if !onDemand.isEmpty || !notes(.onDemand).isEmpty {
+            GroupHeader(title: "When relevant",
+                        detail: onDemand.isEmpty ? nil : "\(onDemand.count) \(onDemand.count == 1 ? "file" : "files")")
+                .help("Read only when the agent works on matching files or needs it")
+                .padding(.top, 6)
+            ForEach(onDemand) { EntryCard(entry: $0) }
+            ForEach(notes(.onDemand)) { NoteText(text: $0.message) }
+        }
+
+        if !unused.isEmpty {
+            Button {
+                withAnimation { showUnused.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    GroupHeader(title: "Not used", detail: "\(unused.count) \(unused.count == 1 ? "file" : "files")")
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(showUnused ? 90 : 0))
+                    Spacer()
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .help("Files on disk that this agent ignores, and why")
+            .padding(.top, 6)
+            if showUnused { ForEach(unused) { EntryCard(entry: $0) } }
+        }
+    }
+
+    // MARK: Skills
+
+    @ViewBuilder private var skillGroups: some View {
+        let listed = context.skills.filter { $0.timing.isLoadedAtLaunch }
+        let hidden = context.skills.filter { !$0.timing.isLoadedAtLaunch }
+        let tokens = listed.reduce(0) { $0 + $1.tokens }
+        GroupHeader(title: "Listed every session",
+                    detail: listed.isEmpty ? "no skills"
+                        : "\(listed.count) \(listed.count == 1 ? "skill" : "skills") · about \(tokens.tokenLabel) tokens")
+            .help("Each skill’s name and description are listed at the start of every session; the rest of SKILL.md is read only when the skill is used. \(tokenHelp)")
+        ForEach(listed) { SkillRow(skill: $0) }
+        if !hidden.isEmpty {
+            GroupHeader(title: "Not used", detail: "\(hidden.count) \(hidden.count == 1 ? "skill" : "skills")")
+                .padding(.top, 6)
+            ForEach(hidden) { SkillRow(skill: $0) }
+        }
+    }
+
+    // MARK: Copying a dropped file to this agent
+
+    /// Accepts one local file that this agent doesn't already read.
+    private func prepareCopy(_ urls: [URL]) -> Bool {
+        guard let source = urls.first, urls.count == 1, source.isFileURL,
+              !context.entries.contains(where: { $0.url.standardizedFileURL == source.standardizedFileURL })
+        else { return false }
+        var project: URL?
+        if case .project(let url) = model.selection { project = url }
+        let from = model.contexts.first { ctx in
+            ctx.entries.contains { $0.url.standardizedFileURL == source.standardizedFileURL }
+        }?.agent
+        guard let plan = CopyPlan(source: source, to: context.agent, project: project, from: from) else { return false }
+        pendingCopy = PendingCopy(source: source, plan: plan)
+        return true
+    }
+
+    private var copyTitle: String {
+        guard let pendingCopy else { return "" }
+        return "Copy \(pendingCopy.source.lastPathComponent) to \(context.agent.displayName)?"
+    }
+
+    private var copyMessage: String {
+        guard let plan = pendingCopy?.plan else { return "" }
+        let path = plan.destination.path.replacingOccurrences(
+            of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+        var text = plan.mode == .newFile
+            ? "It will be saved as a new file, \(path), which \(context.agent.displayName) reads at the start of every session."
+            : "Its text will be added to the end of \(path), which \(context.agent.displayName) reads at the start of every session."
+        if !plan.sharedWith.isEmpty {
+            text += " \(plan.sharedWith.map(\.displayName).joined(separator: " and ")) reads this file too."
+        }
+        return text + " The original file is not changed."
+    }
+
+    private func performCopy() {
+        guard let pending = pendingCopy else { return }
+        pendingCopy = nil
+        do {
+            let text = try String(contentsOf: pending.source, encoding: .utf8)
+            try pending.plan.apply(text: text, source: pending.source)
+            model.resolve()
+        } catch {
+            copyError = error.localizedDescription
+        }
+    }
+}
+
+/// The glass card behind each agent section, lit up while a file is dragged over it.
+struct SectionChrome: ViewModifier {
+    let agent: AgentID
+    let isDropTarget: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .glassEffect(isDropTarget ? .regular.tint(agent.tint.opacity(0.3)) : .regular,
+                         in: .rect(cornerRadius: 24))
+            .overlay {
+                if isDropTarget {
+                    RoundedRectangle(cornerRadius: 24).strokeBorder(agent.tint, lineWidth: 2)
+                }
+            }
+    }
+}
+
+struct SkillRow: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirmTrash = false
+    let skill: Skill
+
+    private var isSelected: Bool { model.selectedEntry?.url == skill.url && model.selectedEntry?.agent == skill.agent }
+
+    var body: some View {
+        Button {
+            model.selectedEntry = isSelected ? nil : skill.entry
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(skill.name).font(.body.weight(.medium))
+                    ScopeChip(scope: skill.scope)
+                    Spacer(minLength: 0)
+                    Text("\(skill.tokens.tokenLabel) tokens").font(.caption).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .help(tokenHelp)
+                }
+                if !skill.description.isEmpty {
+                    Text(skill.description).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Text(displayPath(skill.folder)).font(.caption).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
+                if let why = reason {
+                    Text(why).font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .contentShape(.rect(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .glassEffect(isSelected ? .regular.tint(skill.agent.tint.opacity(0.35)).interactive()
+                                : .regular.interactive(),
+                     in: .rect(cornerRadius: 14))
+        .opacity(skill.timing.isLoadedAtLaunch ? 1 : 0.55)
+        .help("Click to edit SKILL.md")
+        .contextMenu {
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([skill.folder]) }
+            Divider()
+            Button("Move to Trash…") { confirmTrash = true }
+        }
+        .confirmationDialog("Move the skill “\(skill.name)” to the Trash?", isPresented: $confirmTrash) {
+            Button("Move to Trash", role: .destructive) { moveToTrash(skill.folder, model: model) }
+        } message: {
+            Text("The whole folder \(displayPath(skill.folder)) goes to the Trash. You can put it back from there.")
+        }
+    }
+
+    private var reason: String? {
+        var parts: [String] = []
+        if case .skipped(let why) = skill.timing { parts.append(why.prefix(1).capitalized + why.dropFirst()) }
+        if let note = skill.note { parts.append(note.prefix(1).capitalized + note.dropFirst()) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+func displayPath(_ url: URL) -> String {
+    guard url.isFileURL else { return url.absoluteString }
+    return url.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+}
+
+/// Moves a file or folder to the Trash, closing it in the editor first.
+@MainActor func moveToTrash(_ url: URL, model: AppModel) {
+    if let open = model.selectedEntry?.url.standardizedFileURL.path,
+       open == url.standardizedFileURL.path || open.hasPrefix(url.standardizedFileURL.path + "/") {
+        model.selectedEntry = nil
+    }
+    NSWorkspace.shared.recycle([url]) { _, _ in
+        Task { @MainActor in model.resolve() }
+    }
+}
+
+struct GroupHeader: View {
+    let title: String
+    let detail: String?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title).font(.subheadline.weight(.semibold))
+            if let detail {
+                Text(detail).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
+    }
+}
+
+struct NoteText: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -130,7 +513,7 @@ struct TokenBar: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(tint.opacity(1 - Double(i % 4) * 0.2))
                         .frame(width: max(3, geo.size.width * CGFloat(e.tokens) / CGFloat(total) - 2))
-                        .help("\(e.url.lastPathComponent) · \(e.tokens.tokenLabel) tokens")
+                        .help("\(e.url.lastPathComponent) · about \(e.tokens.tokenLabel) tokens")
                 }
             }
         }
@@ -141,6 +524,7 @@ struct TokenBar: View {
 
 struct EntryCard: View {
     @Environment(AppModel.self) private var model
+    @State private var confirmTrash = false
     let entry: ContextEntry
 
     private var isSelected: Bool { model.selectedEntry?.id == entry.id && model.selectedEntry?.agent == entry.agent }
@@ -165,11 +549,12 @@ struct EntryCard: View {
                         }
                         Spacer(minLength: 0)
                         if entry.tokens > 0 {
-                            Text(entry.tokens.tokenLabel).font(.caption).monospacedDigit()
+                            Text("\(entry.tokens.tokenLabel) tokens").font(.caption).monospacedDigit()
                                 .foregroundStyle(.secondary)
+                                .help(tokenHelp)
                         }
                     }
-                    Text(displayPath).font(.caption).foregroundStyle(.secondary)
+                    Text(displayPath(entry.url)).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                     if let detail {
                         Text(detail).font(.caption).foregroundStyle(.tertiary)
@@ -184,12 +569,23 @@ struct EntryCard: View {
                                 : .regular.interactive(),
                      in: .rect(cornerRadius: 14))
         .opacity(isSkipped ? 0.55 : 1)
+        .draggable(entry.url)
+        .help("Click to edit. Drag onto another agent to copy it there.")
         .contextMenu {
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(entry.url.path, forType: .string)
             }
+            if entry.url.isFileURL {
+                Divider()
+                Button("Move to Trash…") { confirmTrash = true }
+            }
+        }
+        .confirmationDialog("Move \(entry.url.lastPathComponent) to the Trash?", isPresented: $confirmTrash) {
+            Button("Move to Trash", role: .destructive) { moveToTrash(entry.url, model: model) }
+        } message: {
+            Text("\(displayPath(entry.url)) goes to the Trash. You can put it back from there.")
         }
     }
 
@@ -198,24 +594,21 @@ struct EntryCard: View {
         return false
     }
 
-    private var displayPath: String {
-        guard entry.url.isFileURL else { return entry.url.absoluteString }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return entry.url.path.replacingOccurrences(of: home, with: "~")
-    }
-
     private var detail: String? {
         var parts: [String] = []
         switch entry.timing {
         case .launch: break
-        case .onDemand(let why): parts.append("On demand: \(why)")
-        case .skipped(let why): parts.append("Not loaded: \(why)")
+        case .onDemand(let why): parts.append(why.prefix(1).capitalized + why.dropFirst())
+        case .skipped(let why): parts.append(why.prefix(1).capitalized + why.dropFirst())
         }
         if let by = entry.importedBy { parts.append("imported by \(by.lastPathComponent)") }
         if let note = entry.note { parts.append(note) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
+
+/// Tokens are the units a model reads text in; the counts are estimates.
+let tokenHelp = "Estimated share of the agent’s context window. A token is about 4 English characters or 1 CJK character."
 
 struct ScopeChip: View {
     let scope: Scope

@@ -4,6 +4,7 @@ public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
     case claudeCode
     case codex
     case openCode
+    case cursor
 
     public var id: String { rawValue }
 
@@ -11,7 +12,8 @@ public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
         switch self {
         case .claudeCode: "Claude Code"
         case .codex: "Codex"
-        case .openCode: "opencode"
+        case .openCode: "OpenCode"
+        case .cursor: "Cursor"
         }
     }
 }
@@ -25,8 +27,9 @@ public enum Scope: String, Codable, Sendable, CaseIterable {
     case directory    // nested below the working directory
     case rule         // modular rule files (.claude/rules)
     case autoMemory   // written by the agent itself
-    case extra        // pulled in by configuration (opencode `instructions`)
+    case extra        // pulled in by configuration (OpenCode `instructions`)
     case imported     // reached through an @import
+    case bundled      // ships with the agent itself
 
     public var displayName: String {
         switch self {
@@ -39,6 +42,7 @@ public enum Scope: String, Codable, Sendable, CaseIterable {
         case .autoMemory: "Auto memory"
         case .extra: "Extra"
         case .imported: "Import"
+        case .bundled: "Bundled"
         }
     }
 }
@@ -97,15 +101,22 @@ public struct Diagnostic: Identifiable, Sendable, Hashable {
         }
     }
 
+    /// Which part of the context a note is about, so it can be shown there.
+    public enum Topic: Sendable, Hashable {
+        case launch, onDemand
+    }
+
     public var id: String { severity.rawValue + message + (url?.path ?? "") }
     public var severity: Severity
     public var message: String
     public var url: URL?
+    public var topic: Topic
 
-    public init(_ severity: Severity, _ message: String, url: URL? = nil) {
+    public init(_ severity: Severity, _ message: String, url: URL? = nil, topic: Topic = .launch) {
         self.severity = severity
         self.message = message
         self.url = url
+        self.topic = topic
     }
 }
 
@@ -115,6 +126,7 @@ public struct ResolvedContext: Sendable {
     public var projectRoot: URL?
     public var entries: [ContextEntry]
     public var diagnostics: [Diagnostic]
+    public var skills: [Skill] = []
 
     public var launchTokens: Int {
         entries.filter { $0.timing.isLoadedAtLaunch }.reduce(0) { $0 + $1.tokens }
@@ -158,7 +170,7 @@ public protocol ContextResolver: Sendable {
 
 public enum Resolvers {
     public static let all: [any ContextResolver] = [
-        ClaudeCodeResolver(), CodexResolver(), OpenCodeResolver(),
+        ClaudeCodeResolver(), CodexResolver(), OpenCodeResolver(), CursorResolver(),
     ]
 
     public static func resolveAll(workingDirectory: URL,

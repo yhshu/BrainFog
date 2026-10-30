@@ -1,6 +1,6 @@
 import Foundation
 
-/// Models opencode's rule loading. The docs leave the merge order and
+/// Models OpenCode's rule loading. The docs leave the merge order and
 /// multi-level behaviour open; where this resolver infers, entries say so.
 /// See docs/DESIGN.md §3.
 public struct OpenCodeResolver: ContextResolver {
@@ -18,7 +18,7 @@ public struct OpenCodeResolver: ContextResolver {
         let noClaudePrompt = noClaude || env.flag("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT")
         var list = EntryList(agent: agent)
 
-        // Global: opencode's own AGENTS.md, else Claude Code's global file.
+        // Global: OpenCode's own AGENTS.md, else Claude Code's global file.
         let globalAgents = globalDir.appendingPathComponent("AGENTS.md")
         let claudeGlobal = env.home.appendingPathComponent(".claude/CLAUDE.md")
         if FileSupport.isFile(globalAgents) {

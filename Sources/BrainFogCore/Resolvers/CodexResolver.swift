@@ -25,7 +25,7 @@ public struct CodexResolver: ContextResolver {
             FileSupport.ancestors(of: cwd).filter { FileSupport.isWithin($0, root) }
         } ?? [cwd]
         if projectRoot == nil {
-            list.diagnostics.append(.init(.info, "No git root found, so Codex reads AGENTS.md from the current directory only."))
+            list.diagnostics.append(.init(.info, "Not a git repository, so only this folder’s AGENTS.md is read"))
         }
         let names = ["AGENTS.override.md", "AGENTS.md"] + config.fallbackFilenames
         var budget = config.maxBytes
@@ -56,9 +56,11 @@ public struct CodexResolver: ContextResolver {
         for url in FileSupport.walk(memoriesDir, maxDepth: 3) {
             list.add(url, scope: .autoMemory, timing: memoryTiming, note: "generated; hand edits are discouraged")
         }
-        if let stats = CodexMemoryStore(codexHome: codexHome)?.stats() {
-            list.diagnostics.append(.init(.info,
-                "The Codex memory database holds \(stats.rawMemories) raw per-thread memories; \(stats.selected) selected for consolidation."))
+        if config.memoriesEnabled, let stats = CodexMemoryStore(codexHome: codexHome)?.stats() {
+            list.diagnostics.append(.init(.info, stats.rawMemories == 0
+                ? "No memories yet. Codex writes them after conversations and brings back the relevant ones later."
+                : "Memories from \(stats.rawMemories) past conversations; Codex brings back the relevant ones.",
+                topic: .onDemand))
         }
 
         return list.finish(workingDirectory: cwd, projectRoot: projectRoot)

@@ -195,6 +195,147 @@ final class Sandbox {
 
     @Test func tokensCountCJKPerCharacter() {
         #expect(TokenEstimator.estimate("abcd") == 1)
-        #expect(TokenEstimator.estimate("记忆") == 2)
+        #expect(TokenEstimator.estimate("\u{8BB0}\u{5FC6}") == 2)
+    }
+}
+
+@Suite struct CursorTests {
+    @Test func ruleTypes() throws {
+        let s = try Sandbox()
+        try s.write(".cursor/rules/always.mdc", "---\nalwaysApply: true\n---\nalways", in: s.project)
+        try s.write(".cursor/rules/swift.mdc", "---\nglobs: *.swift, *.m\nalwaysApply: false\n---\nx", in: s.project)
+        try s.write(".cursor/rules/smart.mdc", "---\ndescription: Database tips\n---\nx", in: s.project)
+        try s.write(".cursor/rules/manual.mdc", "x", in: s.project)
+        try s.write(".cursor/rules/plain.md", "x", in: s.project)
+        try s.write("AGENTS.md", "agents", in: s.project)
+        try s.write(".cursorrules", "legacy", in: s.project)
+        try s.write("web/AGENTS.md", "web", in: s.project)
+        try s.write("web/.cursor/rules/ui.mdc", "---\nalwaysApply: true\n---\nui", in: s.project)
+        try s.write("node_modules/x/AGENTS.md", "ignored", in: s.project)
+
+        let ctx = CursorResolver().resolve(workingDirectory: s.project, environment: s.env())
+        #expect(s.names(ctx) == [
+            "~/code/app/.cursor/rules/always.mdc", "~/code/app/AGENTS.md", "~/code/app/.cursorrules",
+        ])
+        func timing(_ name: String) -> LoadTiming? {
+            ctx.entries.first { $0.url.path.hasSuffix(name) }?.timing
+        }
+        #expect(timing("swift.mdc") == .onDemand("when files matching *.swift, *.m are in context"))
+        #expect(timing("smart.mdc") == .onDemand("when the agent judges it relevant: Database tips"))
+        #expect(timing("manual.mdc") == .onDemand("only when @-mentioned in chat"))
+        #expect(timing("plain.md") == .skipped("Cursor only reads .mdc rule files"))
+        #expect(timing("web/AGENTS.md") == .onDemand("when working in web/"))
+        #expect(timing("web/.cursor/rules/ui.mdc") == .onDemand("when working in web/"))
+        #expect(timing("node_modules/x/AGENTS.md") == nil)
+    }
+
+    @Test func newRuleFileIsAlwaysApplied() throws {
+        let s = try Sandbox()
+        let rule = try #require(NewFileOption.options(for: .cursor, project: s.project, environment: s.env())
+            .first { $0.needsName })
+        let url = try rule.create(name: "style")
+        #expect(url.lastPathComponent == "style.mdc")
+        let ctx = CursorResolver().resolve(workingDirectory: s.project, environment: s.env())
+        #expect(s.names(ctx).contains("~/code/app/.cursor/rules/style.mdc"))
+        #expect(NewFileOption.options(for: .cursor, project: nil, environment: s.env()).isEmpty)
+    }
+
+    @Test func skillLocations() throws {
+        let s = try Sandbox()
+        try s.write(".cursor/skills/a/SKILL.md", "---\nname: a\ndescription: x\n---\n", in: s.project)
+        try s.write(".claude/skills/b/SKILL.md", "---\nname: b\ndescription: x\n---\n")
+        try s.write(".codex/skills/c/SKILL.md", "---\nname: c\ndescription: x\n---\n")
+        try s.write(".cursor/skills-cursor/d/SKILL.md", "---\nname: d\ndescription: x\n---\n")
+        let skills = SkillResolver.resolve(agent: .cursor, workingDirectory: s.project, environment: s.env())
+        #expect(skills.map(\.name) == ["a", "b", "c", "d"])
+        #expect(skills.last?.scope == .bundled)
+
+        // New skills go where Cursor looks, in both layers.
+        for project in [s.project, nil] {
+            let folder = SkillResolver.newSkillFolder(named: "new", agent: .cursor, project: project, environment: s.env())
+            try s.write("SKILL.md", SkillResolver.template(name: "new"), in: folder)
+            let found = SkillResolver.resolve(agent: .cursor, workingDirectory: project, environment: s.env())
+            #expect(found.contains { $0.url.path == folder.appendingPathComponent("SKILL.md").path })
+        }
+    }
+}
+
+@Suite struct CopyTests {
+    /// A copied file must end up somewhere the target agent loads at launch.
+    @Test func copiesLoadInTheTargetAgent() throws {
+        let s = try Sandbox()
+        try s.write("MEMORY.md", "remember this", in: s.project)
+        let source = s.project.appendingPathComponent("MEMORY.md")
+
+        let toClaude = try #require(CopyPlan(source: source, to: .claudeCode, project: s.project, from: .codex, environment: s.env()))
+        #expect(toClaude.destination.path.hasSuffix("app/.claude/rules/codex-MEMORY.md"))
+        try toClaude.apply(text: "remember this", source: source)
+        let claude = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
+        #expect(s.names(claude).contains("~/code/app/.claude/rules/codex-MEMORY.md"))
+        // A second copy gets its own name instead of overwriting.
+        #expect(CopyPlan(source: source, to: .claudeCode, project: s.project, from: .codex, environment: s.env())?
+            .destination.lastPathComponent == "codex-MEMORY-2.md")
+
+        try s.write("AGENTS.md", "existing", in: s.project)
+        let toCodex = try #require(CopyPlan(source: source, to: .codex, project: s.project, from: .claudeCode, environment: s.env()))
+        #expect(toCodex.mode == .append && toCodex.sharedWith == [.openCode, .cursor])
+        try toCodex.apply(text: "remember this", source: source)
+        let agents = try String(contentsOf: s.project.appendingPathComponent("AGENTS.md"), encoding: .utf8)
+        #expect(agents.hasPrefix("existing\n\n<!-- Copied from ") && agents.hasSuffix("remember this\n"))
+
+        let global = CopyPlan(source: source, to: .openCode, project: nil, from: nil, environment: s.env())
+        #expect(global?.destination.path == s.home.appendingPathComponent(".config/opencode/AGENTS.md").path)
+
+        // Cursor gets an always-applied rule; it has no global rule file.
+        try s.write("style.md", "---\npaths: [\"*.swift\"]\n---\nUse tabs.\n", in: s.project)
+        let style = s.project.appendingPathComponent("style.md")
+        let toCursor = try #require(CopyPlan(source: style, to: .cursor, project: s.project, from: .claudeCode, environment: s.env()))
+        #expect(toCursor.destination.path.hasSuffix("app/.cursor/rules/claudeCode-style.mdc"))
+        try toCursor.apply(text: FileSupport.read(style)!, source: style)
+        let written = try String(contentsOf: toCursor.destination, encoding: .utf8)
+        #expect(!written.contains("paths:") && written.hasSuffix("Use tabs.\n"))
+        let cursor = CursorResolver().resolve(workingDirectory: s.project, environment: s.env())
+        #expect(s.names(cursor).contains("~/code/app/.cursor/rules/claudeCode-style.mdc"))
+        #expect(CopyPlan(source: style, to: .cursor, project: nil, from: nil, environment: s.env()) == nil)
+    }
+}
+
+@Suite struct SkillTests {
+    @Test func claudePersonalBeatsProject() throws {
+        let s = try Sandbox()
+        try s.write(".claude/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: Personal deploy\n---\n")
+        try s.write(".claude/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: Project deploy\n---\n", in: s.project)
+        try s.write(".claude/skills/lint/SKILL.md", "---\ndescription: >\n  Runs the\n  linter\n---\n", in: s.project)
+        let skills = SkillResolver.resolve(agent: .claudeCode, workingDirectory: s.project, environment: s.env())
+        #expect(skills.map(\.name) == ["deploy", "deploy", "lint"])
+        #expect(skills[0].scope == .user && skills[0].timing.isLoadedAtLaunch)
+        #expect(!skills[1].timing.isLoadedAtLaunch)
+        #expect(skills[2].description == "Runs the linter")
+        // The global layer leaves project skills out.
+        #expect(SkillResolver.resolve(agent: .claudeCode, workingDirectory: nil, environment: s.env()).count == 1)
+    }
+
+    @Test func codexAndOpenCodeLocations() throws {
+        let s = try Sandbox()
+        try s.write(".agents/skills/a/SKILL.md", "---\nname: a\ndescription: x\n---\n", in: s.project)
+        try s.write(".codex/skills/b/SKILL.md", "---\nname: b\ndescription: x\n---\n")
+        try s.write(".codex/skills/.system/c/SKILL.md", "---\nname: c\ndescription: x\n---\n")
+        try s.write(".claude/skills/d/SKILL.md", "---\nname: d\ndescription: x\n---\n", in: s.project)
+        let codex = SkillResolver.resolve(agent: .codex, workingDirectory: s.project, environment: s.env())
+        #expect(codex.map(\.name) == ["a", "b", "c"])
+        #expect(codex.map(\.scope) == [.project, .user, .bundled])
+        let open = SkillResolver.resolve(agent: .openCode, workingDirectory: s.project, environment: s.env())
+        #expect(Set(open.map(\.name)) == ["a", "d"])
+    }
+
+    @Test func newRuleFileLoadsInClaude() throws {
+        let s = try Sandbox()
+        let rule = try #require(NewFileOption.options(for: .claudeCode, project: s.project, environment: s.env())
+            .first { $0.needsName })
+        let url = try rule.create(name: "style")
+        try "Use tabs.".write(to: url, atomically: true, encoding: .utf8)
+        let ctx = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
+        #expect(s.names(ctx).contains("~/code/app/.claude/rules/style.md"))
+        #expect(throws: (any Error).self) { try rule.create(name: "style") }
     }
 }

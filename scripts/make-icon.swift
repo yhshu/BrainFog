@@ -1,5 +1,5 @@
-// Draws the BrainFog app icon: a glowing core behind wavy layers that run
-// from foggy at the top to sharp at the bottom.
+// Draws the BrainFog app icon: a brain over a glow in the three agent
+// colors, its lower half lost in drifting fog.
 //
 // Usage: swift scripts/make-icon.swift <output.png>   (1024×1024)
 import AppKit
@@ -47,7 +47,7 @@ let glow = blurred(canvas { ctx in
     let blobs: [(CGPoint, Double, CGColor)] = [
         (CGPoint(x: 430, y: 560), 190, color(0.85, 0.47, 0.34, 0.95)),   // Claude Code
         (CGPoint(x: 600, y: 590), 180, color(0.36, 0.55, 0.98, 0.95)),   // Codex
-        (CGPoint(x: 520, y: 450), 170, color(0.30, 0.75, 0.55, 0.85)),   // opencode
+        (CGPoint(x: 520, y: 450), 170, color(0.30, 0.75, 0.55, 0.85)),   // OpenCode
     ]
     for (c, r, col) in blobs {
         ctx.setFillColor(col)
@@ -55,38 +55,82 @@ let glow = blurred(canvas { ctx in
     }
 }, 70)
 
-// 3. Layers: a gentle wave each, blur falling and opacity rising toward the bottom.
-func wave(y: Double, amplitude: Double, phase: Double) -> CGPath {
-    let path = CGMutablePath()
-    let left = 250.0, right = 774.0, steps = 120
-    for i in 0...steps {
-        let t = Double(i) / Double(steps)
-        let x = left + (right - left) * t
-        let p = CGPoint(x: x, y: y + amplitude * sin(t * .pi * 2 + phase))
-        i == 0 ? path.move(to: p) : path.addLine(to: p)
+// 3. Brain: two scalloped hemispheres seen from above, with a few folds.
+func hemisphere(center: CGPoint, mirrored: Bool) -> (outline: CGPath, folds: CGPath) {
+    let rx = 132.0, ry = 200.0, lumps = 11
+    var outline = CGPath(ellipseIn: CGRect(x: center.x - rx, y: center.y - ry, width: 2 * rx, height: 2 * ry), transform: nil)
+    for i in 0..<lumps {
+        let a = Double(i) / Double(lumps) * 2 * .pi
+        let p = CGPoint(x: center.x + rx * cos(a), y: center.y + ry * sin(a))
+        // Leave the inner edge, along the midline, smooth.
+        if (mirrored ? -cos(a) : cos(a)) > 0.7 { continue }
+        outline = outline.union(CGPath(ellipseIn: CGRect(x: p.x - 52, y: p.y - 52, width: 104, height: 104), transform: nil))
     }
-    return path
+    let s = mirrored ? -1.0 : 1.0
+    let folds = CGMutablePath()
+    folds.move(to: CGPoint(x: center.x - s * 70, y: center.y + 120))
+    folds.addCurve(to: CGPoint(x: center.x + s * 60, y: center.y + 60),
+                   control1: CGPoint(x: center.x - s * 10, y: center.y + 150), control2: CGPoint(x: center.x + s * 10, y: center.y + 60))
+    folds.move(to: CGPoint(x: center.x - s * 100, y: center.y - 10))
+    folds.addCurve(to: CGPoint(x: center.x + s * 70, y: center.y - 40),
+                   control1: CGPoint(x: center.x - s * 40, y: center.y + 40), control2: CGPoint(x: center.x + s * 20, y: center.y - 60))
+    folds.move(to: CGPoint(x: center.x - s * 60, y: center.y - 150))
+    folds.addCurve(to: CGPoint(x: center.x + s * 50, y: center.y - 110),
+                   control1: CGPoint(x: center.x - s * 20, y: center.y - 100), control2: CGPoint(x: center.x + s * 20, y: center.y - 150))
+    return (outline, folds)
 }
 
-let layers: [(y: Double, blur: Double, alpha: Double, width: Double)] = [
-    (690, 16, 0.35, 34),
-    (580, 9, 0.55, 34),
-    (470, 3.5, 0.8, 34),
-    (360, 0, 1.0, 34),
-]
-var strata = CIImage.empty()
-for (i, layer) in layers.enumerated() {
-    let line = canvas { ctx in
-        ctx.addPath(wave(y: layer.y, amplitude: 26, phase: Double(i) * 0.9))
-        ctx.setLineWidth(layer.width)
-        ctx.setLineCap(.round)
-        ctx.setStrokeColor(color(1, 1, 1, layer.alpha))
+let brain = canvas { ctx in
+    ctx.setStrokeColor(color(1, 1, 1, 0.95))
+    ctx.setLineCap(.round)
+    ctx.setLineJoin(.round)
+    for mirrored in [false, true] {
+        let h = hemisphere(center: CGPoint(x: mirrored ? 662 : 362, y: 560), mirrored: mirrored)
+        ctx.setLineWidth(26)
+        ctx.addPath(h.outline)
+        ctx.strokePath()
+        ctx.setLineWidth(20)
+        ctx.addPath(h.folds)
         ctx.strokePath()
     }
-    strata = blurred(line, layer.blur).composited(over: strata)
 }
 
-// 4. Glass rim: a faint light edge along the top of the tile.
+// 4. Fog: the brain goes from sharp at the top to blurred and faded at the
+// bottom, with long soft strands drifting across it.
+func verticalMask(top: Double, bottom: Double, opaqueAtTop: Bool) -> CIImage {
+    canvas { ctx in
+        let ends = [color(1, 1, 1, 1), color(1, 1, 1, 0)]
+        let gradient = CGGradient(colorsSpace: space, colors: (opaqueAtTop ? ends : ends.reversed()) as CFArray,
+                                  locations: [0, 1])!
+        ctx.drawLinearGradient(gradient, start: CGPoint(x: 512, y: top), end: CGPoint(x: 512, y: bottom),
+                               options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    }
+}
+func masked(_ image: CIImage, _ mask: CIImage) -> CIImage {
+    image.applyingFilter("CIBlendWithAlphaMask", parameters: [
+        kCIInputBackgroundImageKey: CIImage.empty(), kCIInputMaskImageKey: mask,
+    ])
+}
+let sharpBrain = masked(brain, verticalMask(top: 640, bottom: 470, opaqueAtTop: true))
+let foggyBrain = masked(blurred(brain, 16), verticalMask(top: 640, bottom: 470, opaqueAtTop: false))
+    .applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.6)])
+
+let strands: [(rect: CGRect, blur: Double, alpha: Double)] = [
+    (CGRect(x: 40, y: 440, width: 620, height: 90), 30, 0.55),
+    (CGRect(x: 360, y: 360, width: 640, height: 110), 32, 0.7),
+    (CGRect(x: 20, y: 200, width: 800, height: 170), 38, 0.85),
+]
+var fog = CIImage.empty()
+for s in strands {
+    let strand = canvas { ctx in
+        ctx.setFillColor(color(0.86, 0.88, 0.98, s.alpha))
+        ctx.fillEllipse(in: s.rect)
+    }
+    fog = blurred(strand, s.blur).composited(over: fog)
+}
+let strata = fog.composited(over: sharpBrain.composited(over: foggyBrain))
+
+// 5. Glass rim: a faint light edge along the top of the tile.
 let rim = canvas { ctx in
     ctx.addPath(tilePath)
     ctx.clip()

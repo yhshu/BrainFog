@@ -6,6 +6,7 @@ import BrainFogCore
 /// changed on disk since it was opened, unless the user says so.
 struct EditorView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("autoSave") private var autoSave = false
     let entry: ContextEntry
 
     @State private var text = ""
@@ -25,6 +26,10 @@ struct EditorView: View {
                     Text(entry.url.lastPathComponent).font(.headline)
                     ScopeChip(scope: entry.scope)
                     Spacer()
+                    Button("Close", systemImage: "xmark") { model.selectedEntry = nil }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        .keyboardShortcut(.cancelAction)
+                        .help("Close the editor (Esc)")
                 }
                 Text(entry.url.path).font(.caption).foregroundStyle(.secondary)
                     .textSelection(.enabled).lineLimit(2).truncationMode(.middle)
@@ -35,6 +40,7 @@ struct EditorView: View {
                 if let error {
                     Label(error, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red)
                 }
+                actions.padding(.top, 6)
             }
             .padding(16)
 
@@ -44,21 +50,13 @@ struct EditorView: View {
                 .padding(.horizontal, 12)
                 .disabled(!entry.url.isFileURL)
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Button("Show in Finder", systemImage: "folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([entry.url])
-                }
-                Button("Revert", systemImage: "arrow.uturn.backward") { text = original }
-                    .disabled(!isDirty)
-                Button("Save", systemImage: "square.and.arrow.down") { save(force: false) }
-                    .keyboardShortcut("s")
-                    .buttonStyle(.glassProminent)
-                    .tint(entry.agent.tint)
-                    .disabled(!isDirty)
-            }
-        }
         .task { load() }
+        .task(id: text) {
+            // Auto save a moment after typing stops.
+            guard autoSave, isDirty else { return }
+            try? await Task.sleep(for: .seconds(1))
+            if !Task.isCancelled { save(force: false) }
+        }
         .alert("The file changed on disk", isPresented: $conflict) {
             Button("Overwrite", role: .destructive) { save(force: true) }
             Button("Reload") { load() }
@@ -66,6 +64,34 @@ struct EditorView: View {
         } message: {
             Text("Another program, possibly the agent itself, changed this file after you opened it. Overwriting discards those changes.")
         }
+    }
+
+    /// Status on the left, file actions on the right. Plain words rather
+    /// than icons, so nothing has to be guessed.
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Text(status).font(.caption).foregroundStyle(isDirty ? .orange : .secondary)
+            Spacer()
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
+                .disabled(!entry.url.isFileURL)
+            if !autoSave {
+                Button("Revert") { text = original }
+                    .disabled(!isDirty)
+                    .help("Discard unsaved edits")
+            }
+            Button("Save") { save(force: false) }
+                .keyboardShortcut("s")
+                .buttonStyle(.glassProminent)
+                .tint(entry.agent.tint)
+                .disabled(!isDirty)
+                .help("Write the file to disk (⌘S)")
+        }
+        .controlSize(.small)
+    }
+
+    private var status: String {
+        if isDirty { return autoSave ? "Saving…" : "Unsaved changes" }
+        return autoSave ? "Auto Save on" : "Saved"
     }
 
     private func modified() -> Date? {

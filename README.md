@@ -1,6 +1,6 @@
 # BrainFog
 
-A native macOS app for seeing and managing the layered memory and context of AI coding agents: Claude Code, Codex, and opencode.
+A native macOS app for seeing and managing the layered memory and context of AI coding agents: Claude Code, Codex, OpenCode, and Cursor.
 
 Its core is the **Context Lens**: pick any folder, and BrainFog applies each agent's real loading rules to show which files it reads at launch, in what order, how many tokens each takes, and which files are shadowed, cut off, or loaded on demand. See [docs/DESIGN.md](docs/DESIGN.md) for the design and roadmap.
 
