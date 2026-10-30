@@ -31,6 +31,7 @@ struct ContextLensView: View {
     /// being covered.
     @State private var visibleTop: CGFloat = 0
     @State private var scroll = ScrollPosition()
+    @State private var query = ""
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -43,8 +44,8 @@ struct ContextLensView: View {
                     }
                     // One full-width section per agent, stacked top to bottom.
                     VStack(alignment: .leading, spacing: 16) {
-                            ForEach(model.contexts, id: \.agent) { ctx in
-                                AgentSection(context: ctx, mode: mode)
+                            ForEach(model.contexts.filter { shows($0) }, id: \.agent) { ctx in
+                                AgentSection(context: ctx, mode: mode, query: query)
                                     .id(ctx.agent)
                                     .onGeometryChange(for: Bool.self) { geo in
                                         // Its title row is out of sight but the rest isn't.
@@ -53,6 +54,9 @@ struct ContextLensView: View {
                                     } action: { covers in
                                         if covers { pinned = ctx.agent } else if pinned == ctx.agent { pinned = nil }
                                     }
+                        }
+                        if !query.isEmpty, !model.contexts.contains(where: shows) {
+                            ContentUnavailableView.search(text: query)
                         }
                     }
                 }
@@ -85,6 +89,8 @@ struct ContextLensView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { visibleTop = $0 }
                 .animation(.easeOut(duration: 0.15), value: pinned)
             }
+            .searchable(text: $query, placement: .toolbar, prompt: Text(searchPrompt))
+            .onChange(of: query) { pinned = nil }
             .onChange(of: mode) { pinned = nil }
             .onChange(of: model.selection) { pinned = nil }
         }
@@ -103,6 +109,29 @@ struct ContextLensView: View {
                     .help(m.title)
                 }
             }
+            // Pushes the search field to the trailing edge, where the
+            // Human Interface Guidelines put it.
+            ToolbarSpacer(.flexible)
+        }
+    }
+
+    private var searchPrompt: String {
+        switch mode {
+        case .context: "Filter files"
+        case .skills: "Filter skills"
+        case .mcp: "Filter servers"
+        }
+    }
+
+    /// While filtering, an agent is shown if its name matches or anything in
+    /// the current view does.
+    private func shows(_ ctx: ResolvedContext) -> Bool {
+        guard !query.isEmpty else { return true }
+        if Search.matches(query, ctx.agent.displayName) { return true }
+        return switch mode {
+        case .context: ctx.entries.contains { Search.matches(query, $0) }
+        case .skills: ctx.skills.contains { Search.matches(query, $0) }
+        case .mcp: (model.servers[ctx.agent] ?? []).contains { Search.matches(query, $0) }
         }
     }
 
@@ -161,6 +190,7 @@ struct AgentSection: View {
     @State private var newName = ""
     let context: ResolvedContext
     let mode: LensMode
+    var query = ""
 
     /// Asks for a name before creating a rule file or a skill.
     struct NamePrompt {
@@ -173,12 +203,20 @@ struct AgentSection: View {
         var plan: CopyPlan
     }
 
-    private var launched: [ContextEntry] { context.entries.filter { $0.timing.isLoadedAtLaunch } }
+    /// A filter that matches the agent's own name keeps everything.
+    private var filtering: Bool { !query.isEmpty && !Search.matches(query, context.agent.displayName) }
+    private var entries: [ContextEntry] {
+        filtering ? context.entries.filter { Search.matches(query, $0) } : context.entries
+    }
+    private var skills: [Skill] {
+        filtering ? context.skills.filter { Search.matches(query, $0) } : context.skills
+    }
+    private var launched: [ContextEntry] { entries.filter { $0.timing.isLoadedAtLaunch } }
     private var onDemand: [ContextEntry] {
-        context.entries.filter { if case .onDemand = $0.timing { true } else { false } }
+        entries.filter { if case .onDemand = $0.timing { true } else { false } }
     }
     private var unused: [ContextEntry] {
-        context.entries.filter { if case .skipped = $0.timing { true } else { false } }
+        entries.filter { if case .skipped = $0.timing { true } else { false } }
     }
     private func notes(_ topic: Diagnostic.Topic) -> [Diagnostic] {
         context.diagnostics.filter { $0.severity == .info && $0.topic == topic }
@@ -193,16 +231,19 @@ struct AgentSection: View {
     /// comma-separated raw values.
     @AppStorage("collapsedAgents") private var collapsedAgents = ""
 
-    private var servers: [MCPServer] { model.servers[context.agent] ?? [] }
+    private var servers: [MCPServer] {
+        let all = model.servers[context.agent] ?? []
+        return filtering ? all.filter { Search.matches(query, $0) } : all
+    }
 
     private var hasItems: Bool {
         switch mode {
-        case .context: !context.entries.isEmpty
-        case .skills: !context.skills.isEmpty
+        case .context: !entries.isEmpty
+        case .skills: !skills.isEmpty
         case .mcp: !servers.isEmpty
         }
     }
-    private var isCollapsed: Bool { hasItems && collapsedAgents.split(separator: ",").contains(Substring(context.agent.rawValue)) }
+    private var isCollapsed: Bool { query.isEmpty && hasItems && collapsedAgents.split(separator: ",").contains(Substring(context.agent.rawValue)) }
 
     private func toggleCollapsed() {
         var set = Set(collapsedAgents.split(separator: ",").map(String.init))
@@ -213,14 +254,14 @@ struct AgentSection: View {
     /// What a folded section still says about itself.
     private var summary: String {
         if mode == .skills {
-            let n = context.skills.count
+            let n = skills.count
             return "\(n) \(n == 1 ? "skill" : "skills")"
         }
         if mode == .mcp {
             let n = servers.count
             return "\(n) \(n == 1 ? "server" : "servers")"
         }
-        let n = context.entries.count
+        let n = entries.count
         return "\(n) \(n == 1 ? "file" : "files") · about \(context.launchTokens.tokenLabel) tokens at launch"
     }
 
@@ -424,7 +465,7 @@ struct AgentSection: View {
                 HStack(spacing: 6) {
                     GroupHeader(title: "Not used", detail: "\(unused.count) \(unused.count == 1 ? "file" : "files")")
                     Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(showUnused ? 90 : 0))
+                        .rotationEffect(.degrees(showUnused || !query.isEmpty ? 90 : 0))
                     Spacer()
                 }
                 .contentShape(.rect)
@@ -432,7 +473,7 @@ struct AgentSection: View {
             .buttonStyle(.plain)
             .help("Files on disk that this agent ignores, and why")
             .padding(.top, 6)
-            if showUnused { ForEach(unused) { EntryCard(entry: $0) } }
+            if showUnused || !query.isEmpty { ForEach(unused) { EntryCard(entry: $0) } }
         }
     }
 
@@ -441,15 +482,15 @@ struct AgentSection: View {
     /// On a project page, the project's own skills come first and the global
     /// ones (which the agent also lists there) fold away below them.
     @ViewBuilder private var skillGroups: some View {
-        let listed = context.skills.filter { $0.timing.isLoadedAtLaunch }
+        let listed = skills.filter { $0.timing.isLoadedAtLaunch }
         let tokens = listed.reduce(0) { $0 + $1.tokens }
         GroupHeader(title: "Listed every session",
                     detail: listed.isEmpty ? "no skills"
                         : "\(listed.count) \(listed.count == 1 ? "skill" : "skills") · about \(tokens.tokenLabel) tokens")
             .help("Each skill’s name and description are listed at the start of every session; the rest of SKILL.md is read only when the skill is used. Skills a higher-priority one replaces are dimmed. \(tokenHelp)")
         if let project {
-            let own = context.skills.filter { $0.scope == .project }
-            let shared = context.skills.filter { $0.scope != .project }
+            let own = skills.filter { $0.scope == .project }
+            let shared = skills.filter { $0.scope != .project }
             GroupHeader(title: "This project", detail: "\(own.count) \(own.count == 1 ? "skill" : "skills")")
                 .padding(.top, 6)
             if own.isEmpty {
@@ -463,7 +504,7 @@ struct AgentSection: View {
                     HStack(spacing: 6) {
                         GroupHeader(title: "Global", detail: "\(shared.count) \(shared.count == 1 ? "skill" : "skills") · shared by every project")
                         Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                            .rotationEffect(.degrees(showGlobalSkills ? 90 : 0))
+                            .rotationEffect(.degrees(showGlobalSkills || !query.isEmpty ? 90 : 0))
                         Spacer()
                     }
                     .contentShape(.rect)
@@ -471,11 +512,11 @@ struct AgentSection: View {
                 .buttonStyle(.plain)
                 .help("Skills from your home folder and the agent itself, also listed in this project")
                 .padding(.top, 6)
-                if showGlobalSkills { ForEach(shared) { SkillRow(skill: $0) } }
+                if showGlobalSkills || !query.isEmpty { ForEach(shared) { SkillRow(skill: $0) } }
             }
         } else {
             ForEach(listed) { SkillRow(skill: $0) }
-            ForEach(context.skills.filter { !$0.timing.isLoadedAtLaunch }) { SkillRow(skill: $0) }
+            ForEach(skills.filter { !$0.timing.isLoadedAtLaunch }) { SkillRow(skill: $0) }
         }
     }
 
@@ -996,5 +1037,25 @@ struct PinnedAgentHeader: View {
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
         .help("Back to the start of \(context.agent.displayName)’s section")
+    }
+}
+
+/// Case- and diacritic-insensitive matching for the lens's filter field.
+enum Search {
+    static func matches(_ query: String, _ text: String) -> Bool {
+        let terms = query.split(separator: " ")
+        return terms.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    static func matches(_ query: String, _ entry: ContextEntry) -> Bool {
+        matches(query, [entry.url.path, entry.scope.displayName, entry.note ?? ""].joined(separator: " "))
+    }
+
+    static func matches(_ query: String, _ skill: Skill) -> Bool {
+        matches(query, [skill.name, skill.description, skill.url.path, skill.scope.displayName].joined(separator: " "))
+    }
+
+    static func matches(_ query: String, _ server: MCPServer) -> Bool {
+        matches(query, [server.name, server.summary, server.file.path, server.scope.displayName].joined(separator: " "))
     }
 }
