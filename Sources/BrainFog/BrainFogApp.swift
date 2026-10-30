@@ -109,8 +109,7 @@ struct AgentIcon: View {
 }
 
 /// BrainFog's own stand-in mark for an agent: not the vendor's logo, just a
-/// squircle in the agent's colours with a glyph for how it's used (a plain
-/// O in a circle for OpenCode, matching its mark). Sized to
+/// squircle in the agent's colours with a glyph for how it's used. Sized to
 /// the macOS icon grid (824/1024 body) so it sits level with real app icons.
 struct AgentMark: View {
     let agent: AgentID
@@ -119,27 +118,6 @@ struct AgentMark: View {
     private var body_: CGFloat { size * 824 / 1024 }
 
     var body: some View {
-        if agent == .openCode { openCodeMark } else { squircle }
-    }
-
-    /// OpenCode's own shape: a white O inside a black circle.
-    private var openCodeMark: some View {
-        Circle()
-            .fill(Color(white: 0.08))
-            .overlay {
-                Circle().strokeBorder(.white.opacity(0.18), lineWidth: max(0.5, size / 64))
-            }
-            .overlay {
-                Circle()
-                    .strokeBorder(.white, lineWidth: body_ * 0.12)
-                    .padding(body_ * 0.26)
-            }
-            .frame(width: body_, height: body_)
-            .shadow(color: .black.opacity(0.25), radius: size / 40, y: size / 80)
-            .frame(width: size, height: size)
-    }
-
-    private var squircle: some View {
         RoundedRectangle(cornerRadius: body_ * 0.225, style: .continuous)
             .fill(background)
             .overlay {
@@ -156,7 +134,7 @@ struct AgentMark: View {
         let colors: [Color] = switch agent {
         case .claudeCode: [Color(red: 0.89, green: 0.53, blue: 0.40), Color(red: 0.78, green: 0.39, blue: 0.27)]
         case .codex: [Color(white: 1), Color(white: 0.93)]
-        case .openCode: [Color(white: 0.12), Color(white: 0.04)]
+        case .openCode: [Color(red: 0.09, green: 0.08, blue: 0.08), Color(red: 0.05, green: 0.04, blue: 0.04)]
         case .cursor: [Color(white: 0.26), Color(white: 0.12)]
         }
         return LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
@@ -175,7 +153,17 @@ struct AgentMark: View {
                 .foregroundStyle(.black)
                 .offset(y: -body_ * 0.03)
         case .openCode:
-            EmptyView() // drawn by openCodeMark
+            // The "O" of OpenCode's pixel wordmark: a 24×30 block with a
+            // 12×18 opening whose lower two thirds are filled grey.
+            let u = body_ * 0.48 / 30
+            ZStack(alignment: .topLeading) {
+                Rectangle().fill(.white).frame(width: 24 * u, height: 30 * u)
+                Rectangle().fill(Color(red: 0.07, green: 0.06, blue: 0.06))
+                    .frame(width: 12 * u, height: 6 * u).offset(x: 6 * u, y: 6 * u)
+                Rectangle().fill(Color(white: 0.42))
+                    .frame(width: 12 * u, height: 12 * u).offset(x: 6 * u, y: 12 * u)
+            }
+            .frame(width: 24 * u, height: 30 * u)
         case .cursor:
             Image(systemName: "cursorarrow")
                 .font(.system(size: body_ * 0.48, weight: .bold))
