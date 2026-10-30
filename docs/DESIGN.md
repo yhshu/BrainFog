@@ -100,7 +100,7 @@ BrainFog (SwiftUI app, macOS 26+)
  │   ├─ Health       credentials in files, unignored local files, oversized context
  │   ├─ RuleFormat   frontmatter forms per rule kind
  │   ├─ History      content-addressed versions of every file seen or written; ChangeSet/FileEdit with conflict check
- │   └─ Pack         .agentpack read/write, secret stripping, diff  [MVP-2]
+ │   └─ Pack         .agentpack read/write, secret stripping, import as a ChangeSet
  └─ App              windows, sidebar, Context Lens, editor
 ```
 
@@ -123,7 +123,7 @@ Principles:
 |---|---|
 | MVP-0 | Project skeleton, resolvers + tests, first UI for Context Lens and global/project browsing and editing |
 | MVP-1 (current) | Gemini CLI, Copilot, Devin, Cline; MCP view and copy; shared AGENTS.md fixes; health checks; frontmatter forms; history with restore; every write previewed as a diff |
-| MVP-2 | `.agentpack` format, secret stripping, import diff preview; skills and MCP connectors included |
+| MVP-2 | `.agentpack` format, secret stripping, import diff preview; skills and MCP connectors included (done: one JSON file; File → Import/Export Agent Pack) |
 | MVP-3 | Timeline view across files, with undo; FSEvents watching instead of snapshots on refresh (done) |
 | Later | Single-source compilation to multiple formats, drift detection, more agents (Gemini CLI, etc.) |
 

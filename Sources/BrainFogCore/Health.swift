@@ -79,10 +79,13 @@ public enum HealthCheck {
         return issues
     }
 
+    /// Well-known API key and token shapes.
+    static let secretPattern = try! NSRegularExpression(pattern:
+        #"(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[bp]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{20,})"#)
+
     /// 1-based line number of the first thing that looks like a credential.
     static func secret(in text: String) -> Int? {
-        let re = try! NSRegularExpression(pattern:
-            #"(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[bp]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{20,})"#)
+        let re = secretPattern
         for (n, line) in text.components(separatedBy: "\n").enumerated()
         where re.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
             return n + 1

@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import UniformTypeIdentifiers
 import Observation
 import BrainFogCore
 
@@ -156,6 +158,59 @@ final class AppModel {
             }
         }
     }
+
+    // MARK: Agent packs
+
+    /// Saves this page's instructions, memory, skills and servers as a
+    /// `.agentpack`, then says what was taken out.
+    func exportPack() {
+        let pack = AgentPack.export(project: project, contexts: contexts, servers: servers.values.flatMap { $0 })
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [Self.packType]
+        panel.nameFieldStringValue = "\(pack.source).\(AgentPack.fileExtension)"
+        panel.message = "Packs the files the agents read here, their skills and their MCP servers. Credentials are taken out."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let alert = NSAlert()
+        do {
+            try pack.encoded().write(to: url, options: .atomic)
+            alert.messageText = "Exported \(pack.files.count) \(pack.files.count == 1 ? "file" : "files") and \(pack.servers.count) MCP \(pack.servers.count == 1 ? "server" : "servers")"
+            alert.informativeText = pack.stripped.isEmpty ? "No credentials were found."
+                : "Taken out:\n" + pack.stripped.map { "• " + $0 }.joined(separator: "\n")
+        } catch {
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn’t export the pack"
+            alert.informativeText = error.localizedDescription
+        }
+        alert.runModal()
+    }
+
+    /// Reads a `.agentpack` and shows what importing it into this page
+    /// would write.
+    func importPack() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [Self.packType]
+        panel.message = "Choose a pack to import into \(selection?.title ?? "this page"). You’ll see every change first."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let change = try AgentPack.decode(Data(contentsOf: url)).importChange(project: project)
+            guard !change.edits.isEmpty else {
+                let alert = NSAlert()
+                alert.messageText = "Nothing to import"
+                alert.informativeText = "Everything in the pack is already here. " + change.detail
+                alert.runModal()
+                return
+            }
+            pendingChange = change
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn’t read the pack"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    static let packType = UTType(filenameExtension: AgentPack.fileExtension, conformingTo: .json) ?? .json
 
     /// Applies a reviewed change, then opens its first file.
     func apply(_ change: ChangeSet) throws {

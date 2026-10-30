@@ -20,6 +20,12 @@ struct BrainFogApp: App {
             CommandGroup(after: .saveItem) {
                 Toggle("Auto Save", isOn: $autoSave)
             }
+            CommandGroup(replacing: .importExport) {
+                Button("Import Agent Pack…") { model.importPack() }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Export Agent Pack…") { model.exportPack() }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+            }
             CommandGroup(after: .toolbar) {
                 Button("Reload Files") { model.reloadProjects(); model.resolve() }
                     .keyboardShortcut("r")
