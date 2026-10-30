@@ -22,6 +22,14 @@ public final class History: @unchecked Sendable {
         public var bytes: Int
     }
 
+    /// One change to a file: a version and the one before it.
+    public struct Change: Sendable, Hashable, Identifiable {
+        public var id: String { url.path + version.id }
+        public var url: URL
+        public var version: Version
+        public var previous: Version
+    }
+
     public static let shared = History(directory: FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("BrainFog/History"))
@@ -78,6 +86,36 @@ public final class History: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return load(url).reversed()
+    }
+
+    /// Changes to the given files, newest first. A file's first version
+    /// is where its history starts, not a change, and a copy kept just
+    /// before BrainFog wrote is only the "before" of the write after it.
+    public func changes(to urls: Set<URL>, limit: Int = 300) -> [Change] {
+        var out: [Change] = []
+        lock.lock()
+        defer { lock.unlock() }
+        for url in urls {
+            let log = load(url)
+            for i in log.indices.dropFirst() where log[i].origin != .beforeChange {
+                out.append(Change(url: url, version: log[i], previous: log[i - 1]))
+            }
+        }
+        // Later in a log is newer even when the clock reads the same.
+        let sorted = out.enumerated().sorted { ($0.element.version.date, $0.offset) > ($1.element.version.date, $1.offset) }
+        return Array(sorted.map(\.element).prefix(limit))
+    }
+
+    /// Puts a file back the way it was before `change`, as a change to
+    /// review. Nil when its old text is gone or the file already has it.
+    public func undo(_ change: Change) -> ChangeSet? {
+        guard let old = text(of: change.previous) else { return nil }
+        let now = FileSupport.read(change.url)
+        guard now != old else { return nil }
+        let name = change.url.lastPathComponent
+        return ChangeSet(title: "Undo the change to \(name)?",
+                         detail: "\(name) goes back to how it was before \(change.version.date.formatted(date: .abbreviated, time: .shortened)). Anything written to it since is replaced too, and stays in its History.",
+                         edits: [FileEdit(url: change.url, before: now, after: old)])
     }
 
     public func text(of version: Version) -> String? {

@@ -41,11 +41,19 @@ final class AppModel {
     var hasUnsavedEdits = false
     /// What to do once the user agrees to drop unsaved edits.
     var pendingDiscard: (() -> Void)?
+    /// Goes up after every resolve, which records new versions in History.
+    var historyRevision = 0
+    /// Every file the lens shows for the selected place.
+    var shownFiles: Set<URL> {
+        Set(contexts.flatMap { $0.entries.map(\.url) + $0.skills.map(\.url) }.filter(\.isFileURL)
+            .map(\.standardizedFileURL))
+    }
 
     private let addedKey = "addedProjects"
     private let hiddenKey = "hiddenProjects"
     private let removedKey = "removedProjects"
     private var resolveTask: Task<Void, Never>?
+    @ObservationIgnored private lazy var watcher = FileWatcher { [weak self] in self?.resolve() }
 
     init() {
         reloadProjects()
@@ -126,7 +134,7 @@ final class AppModel {
                                              servers: servers.values.flatMap { $0 })
                 // Keep a version of every file as it is now, so changes made
                 // by the agents themselves show up in each file's history.
-                for url in Set(result.flatMap { $0.entries.map(\.url) }) where url.isFileURL {
+                for url in Set(result.flatMap { $0.entries.map(\.url) + $0.skills.map(\.url) }) where url.isFileURL {
                     History.shared.observe(url)
                 }
                 return (result, servers, sharing, health)
@@ -137,6 +145,8 @@ final class AppModel {
             self.sharing = sharing
             self.health = health
             isResolving = false
+            historyRevision += 1
+            watcher.watch(shownFiles.union(servers.values.flatMap { $0.map(\.file) }))
             if let current = selectedEntry {
                 let all = result.flatMap { $0.entries + $0.skills.map(\.entry) }
                 // A file the agent doesn't list (say, an empty one it skips)

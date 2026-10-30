@@ -3,12 +3,13 @@ import SwiftUI
 import BrainFogCore
 
 enum LensMode: String, CaseIterable {
-    case context, skills, mcp
+    case context, skills, mcp, timeline
     var title: String {
         switch self {
         case .context: "Instructions & Memory"
         case .skills: "Skills"
         case .mcp: "MCP Servers"
+        case .timeline: "Timeline"
         }
     }
     var symbol: String {
@@ -16,6 +17,7 @@ enum LensMode: String, CaseIterable {
         case .context: "text.book.closed"
         case .skills: "puzzlepiece.extension"
         case .mcp: "point.3.connected.trianglepath.dotted"
+        case .timeline: "clock.arrow.circlepath"
         }
     }
 }
@@ -42,8 +44,11 @@ struct ContextLensView: View {
                         if let sharing = model.sharing { SharingCard(report: sharing) }
                         if !model.health.isEmpty { HealthCard(issues: model.health) }
                     }
-                    // One full-width section per agent, stacked top to bottom.
-                    VStack(alignment: .leading, spacing: 16) {
+                    if mode == .timeline {
+                        TimelineList(query: query)
+                    } else {
+                        // One full-width section per agent, stacked top to bottom.
+                        VStack(alignment: .leading, spacing: 16) {
                             ForEach(model.contexts.filter { shows($0) }, id: \.agent) { ctx in
                                 AgentSection(context: ctx, mode: mode, query: query)
                                     .id(ctx.agent)
@@ -54,9 +59,10 @@ struct ContextLensView: View {
                                     } action: { covers in
                                         if covers { pinned = ctx.agent } else if pinned == ctx.agent { pinned = nil }
                                     }
-                        }
-                        if !query.isEmpty, !model.contexts.contains(where: shows) {
-                            ContentUnavailableView.search(text: query)
+                            }
+                            if !query.isEmpty, !model.contexts.contains(where: shows) {
+                                ContentUnavailableView.search(text: query)
+                            }
                         }
                     }
                 }
@@ -120,6 +126,7 @@ struct ContextLensView: View {
         case .context: "Filter files"
         case .skills: "Filter skills"
         case .mcp: "Filter servers"
+        case .timeline: "Filter changes"
         }
     }
 
@@ -132,6 +139,7 @@ struct ContextLensView: View {
         case .context: ctx.entries.contains { Search.matches(query, $0) }
         case .skills: ctx.skills.contains { Search.matches(query, $0) }
         case .mcp: (model.servers[ctx.agent] ?? []).contains { Search.matches(query, $0) }
+        case .timeline: true
         }
     }
 
@@ -143,6 +151,7 @@ struct ContextLensView: View {
             "\(ctx.skills.count) \(ctx.skills.count == 1 ? "skill" : "skills")"
         case .mcp:
             "\((model.servers[ctx.agent] ?? []).count) MCP \((model.servers[ctx.agent] ?? []).count == 1 ? "server" : "servers")"
+        case .timeline: ""
         }
     }
 
@@ -154,6 +163,8 @@ struct ContextLensView: View {
         case (.skills, false): "Skills each agent can use when started in this folder, including global ones."
         case (.mcp, true): "MCP servers each agent can use in every project."
         case (.mcp, false): "MCP servers each agent can use in this folder. Right-click one to copy it to another agent."
+        case (.timeline, true): "Every change to the global files the agents read, newest first, including what agents write to their own memory while BrainFog is open."
+        case (.timeline, false): "Every change to the files the agents read in this folder, newest first, including what agents write to their own memory while BrainFog is open."
         }
     }
 
@@ -241,6 +252,7 @@ struct AgentSection: View {
         case .context: !entries.isEmpty
         case .skills: !skills.isEmpty
         case .mcp: !servers.isEmpty
+        case .timeline: false
         }
     }
     private var isCollapsed: Bool { query.isEmpty && hasItems && collapsedAgents.split(separator: ",").contains(Substring(context.agent.rawValue)) }
@@ -299,6 +311,7 @@ struct AgentSection: View {
                 case .context: contextGroups
                 case .skills: skillGroups
                 case .mcp: serverGroups
+                case .timeline: EmptyView()
                 }
             }
             ForEach(context.diagnostics.filter { $0.severity != .info }) { DiagnosticRow(diagnostic: $0) }
