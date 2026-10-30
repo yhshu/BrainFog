@@ -87,10 +87,10 @@ enum FileSupport {
     }
 }
 
-enum TokenEstimator {
+public enum TokenEstimator {
     /// Rough count: ~4 bytes per token for ASCII text, ~1 token per
     /// non-ASCII scalar (CJK and the like).
-    static func estimate(_ text: String) -> Int {
+    public static func estimate(_ text: String) -> Int {
         var ascii = 0, other = 0
         for scalar in text.unicodeScalars {
             if scalar.isASCII { ascii += 1 } else { other += 1 }

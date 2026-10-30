@@ -38,6 +38,9 @@ struct ContentView: View {
             $0.disablesAnimations = true
         }
         .background(WindowReader(window: $window))
+        .sheet(item: Binding(get: { model.pendingChange }, set: { model.pendingChange = $0 })) { change in
+            ChangePreview(change: change)
+        }
         .alert("Discard unsaved changes?", isPresented: Binding(
             get: { model.pendingDiscard != nil }, set: { if !$0 { model.pendingDiscard = nil } }
         )) {

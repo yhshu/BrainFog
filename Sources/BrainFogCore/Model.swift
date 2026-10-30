@@ -5,6 +5,10 @@ public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
     case codex
     case openCode
     case cursor
+    case geminiCLI
+    case copilot
+    case devin
+    case cline
 
     public var id: String { rawValue }
 
@@ -14,6 +18,10 @@ public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
         case .codex: "Codex"
         case .openCode: "OpenCode"
         case .cursor: "Cursor"
+        case .geminiCLI: "Gemini CLI"
+        case .copilot: "GitHub Copilot"
+        case .devin: "Devin Desktop"
+        case .cline: "Cline"
         }
     }
 }
@@ -171,6 +179,7 @@ public protocol ContextResolver: Sendable {
 public enum Resolvers {
     public static let all: [any ContextResolver] = [
         ClaudeCodeResolver(), CodexResolver(), OpenCodeResolver(), CursorResolver(),
+        GeminiResolver(), CopilotResolver(), DevinResolver(), ClineResolver(),
     ]
 
     public static func resolveAll(workingDirectory: URL,

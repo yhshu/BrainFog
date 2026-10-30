@@ -102,6 +102,62 @@ public enum SkillResolver {
             scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "shared with Claude Code")
             scan(env.home.appendingPathComponent(".codex/skills"), .user, note: "shared with Codex")
             scan(env.home.appendingPathComponent(".cursor/skills-cursor"), .bundled, note: "ships with Cursor")
+        case .geminiCLI:
+            // Highest precedence first: workspace (cwd only), user, extensions;
+            // within a layer .agents beats .gemini.
+            let gHome = GeminiResolver.home(env).appendingPathComponent(".gemini")
+            if let cwd = projectDirs.last {
+                scan(cwd.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
+                scan(cwd.appendingPathComponent(".gemini/skills"), .project)
+            }
+            scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
+            scan(gHome.appendingPathComponent("skills"), .user)
+            for ext in ((try? FileManager.default.contentsOfDirectory(atPath: gHome.appendingPathComponent("extensions").path)) ?? []).sorted() {
+                scan(gHome.appendingPathComponent("extensions/\(ext)/skills"), .extra, note: "from the \(ext) extension")
+            }
+        case .copilot:
+            for dir in projectDirs.reversed() {
+                scan(dir.appendingPathComponent(".github/skills"), .project)
+                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code")
+                scan(dir.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
+            }
+            scan(env.home.appendingPathComponent(".copilot/skills"), .user)
+            scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
+            scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "VS Code’s Local agent only")
+        case .devin:
+            for dir in projectDirs.reversed() {
+                scan(dir.appendingPathComponent(".devin/skills"), .project)
+                scan(dir.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
+                scan(dir.appendingPathComponent(".windsurf/skills"), .project, note: "Windsurf location, still read")
+                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "imported from Claude Code")
+                scan(dir.appendingPathComponent(".github/skills"), .project, note: "imported from Copilot")
+            }
+            scan(env.home.appendingPathComponent(".config/devin/skills"), .user)
+            scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
+            scan(env.home.appendingPathComponent(".codeium/windsurf/skills"), .user, note: "Windsurf location, still read")
+            scan(env.home.appendingPathComponent(".copilot/skills"), .user, note: "imported from Copilot")
+        case .cline:
+            // On a name clash the global skill wins.
+            let clineHome = env.variables["CLINE_DIR"].map { URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home)) }
+                ?? env.home.appendingPathComponent(".cline")
+            scan(clineHome.appendingPathComponent("skills"), .user)
+            scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
+            for dir in projectDirs.reversed() {
+                scan(dir.appendingPathComponent(".clinerules/skills"), .project)
+                scan(dir.appendingPathComponent(".cline/skills"), .project)
+                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code")
+                scan(dir.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
+            }
+        }
+        // Where two folders hold the same skill name, the first one listed wins.
+        if agent != .claudeCode && agent != .openCode {
+            var seen = Set<String>()
+            for i in found.indices {
+                if seen.contains(found[i].name), found[i].timing.isLoadedAtLaunch {
+                    found[i].timing = .skipped("another skill has the same name")
+                }
+                seen.insert(found[i].name)
+            }
         }
         return found
     }
@@ -114,6 +170,10 @@ public enum SkillResolver {
         case .claudeCode: base = (project ?? env.home).appendingPathComponent(".claude/skills")
         case .codex: base = (project ?? env.home).appendingPathComponent(".agents/skills")
         case .cursor: base = (project ?? env.home).appendingPathComponent(".cursor/skills")
+        case .geminiCLI: base = (project ?? env.home).appendingPathComponent(".gemini/skills")
+        case .copilot: base = project?.appendingPathComponent(".github/skills") ?? env.home.appendingPathComponent(".copilot/skills")
+        case .devin: base = project?.appendingPathComponent(".devin/skills") ?? env.home.appendingPathComponent(".config/devin/skills")
+        case .cline: base = (project ?? env.home).appendingPathComponent(".cline/skills")
         case .openCode:
             base = project?.appendingPathComponent(".opencode/skills")
                 ?? (env.variables["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }

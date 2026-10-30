@@ -7,6 +7,8 @@ final class Sandbox {
     let root: URL
     var home: URL { root.appendingPathComponent("home") }
     var project: URL { home.appendingPathComponent("code/app") }
+    /// Keeps tests out of the real History.
+    var history: History { History(directory: root.appendingPathComponent("history")) }
 
     init() throws {
         root = FileManager.default.temporaryDirectory
@@ -269,7 +271,7 @@ final class Sandbox {
 
         let toClaude = try #require(CopyPlan(source: source, to: .claudeCode, project: s.project, from: .codex, environment: s.env()))
         #expect(toClaude.destination.path.hasSuffix("app/.claude/rules/codex-MEMORY.md"))
-        try toClaude.apply(text: "remember this", source: source)
+        try toClaude.apply(text: "remember this", source: source, history: s.history)
         let claude = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
         #expect(s.names(claude).contains("~/code/app/.claude/rules/codex-MEMORY.md"))
         // A second copy gets its own name instead of overwriting.
@@ -279,8 +281,8 @@ final class Sandbox {
         try s.write("AGENTS.md", "existing", in: s.project)
         let toCodex = try #require(CopyPlan(source: source, to: .codex, project: s.project, from: .claudeCode, environment: s.env()))
         // No CLAUDE.md here, so Claude Code reads AGENTS.md too.
-        #expect(toCodex.mode == .append && toCodex.sharedWith == [.claudeCode, .openCode, .cursor])
-        try toCodex.apply(text: "remember this", source: source)
+        #expect(toCodex.mode == .append && toCodex.sharedWith == [.claudeCode, .openCode, .cursor, .copilot, .devin, .cline])
+        try toCodex.apply(text: "remember this", source: source, history: s.history)
         let agents = try String(contentsOf: s.project.appendingPathComponent("AGENTS.md"), encoding: .utf8)
         #expect(agents.hasPrefix("existing\n\n<!-- Copied from ") && agents.hasSuffix("remember this\n"))
 
@@ -292,7 +294,7 @@ final class Sandbox {
         let style = s.project.appendingPathComponent("style.md")
         let toCursor = try #require(CopyPlan(source: style, to: .cursor, project: s.project, from: .claudeCode, environment: s.env()))
         #expect(toCursor.destination.path.hasSuffix("app/.cursor/rules/claudeCode-style.mdc"))
-        try toCursor.apply(text: FileSupport.read(style)!, source: style)
+        try toCursor.apply(text: FileSupport.read(style)!, source: style, history: s.history)
         let written = try String(contentsOf: toCursor.destination, encoding: .utf8)
         #expect(!written.contains("paths:") && written.contains("globs: *.swift") && written.hasSuffix("Use tabs.\n"))
         let cursor = CursorResolver().resolve(workingDirectory: s.project, environment: s.env())

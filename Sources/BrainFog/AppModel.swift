@@ -28,7 +28,14 @@ final class AppModel {
     var hiddenProjects: [ProjectDiscovery.Project] = []
     var selection: Place? = .global
     var contexts: [ResolvedContext] = []
+    /// MCP servers per agent for the selected place.
+    var servers: [AgentID: [MCPServer]] = [:]
+    /// Whether every agent reads the project's AGENTS.md; nil on the global page.
+    var sharing: SharingReport?
+    var health: [HealthIssue] = []
     var selectedEntry: ContextEntry?
+    /// A change waiting for the user to review it.
+    var pendingChange: ChangeSet?
     var isResolving = false
     /// The editor has text that isn't on disk yet.
     var hasUnsavedEdits = false
@@ -104,11 +111,27 @@ final class AppModel {
         guard let place = selection else { contexts = []; return }
         isResolving = true
         resolveTask = Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                Self.contexts(for: place)
+            let (result, servers, sharing, health) = await Task.detached(priority: .userInitiated) {
+                let result = Self.contexts(for: place)
+                let project: URL? = if case .project(let url) = place { url } else { nil }
+                let servers = Dictionary(uniqueKeysWithValues: AgentID.allCases.map {
+                    ($0, MCPResolver.resolve(agent: $0, project: project))
+                })
+                let sharing = project.map { SharingReport.analyze(project: $0, contexts: result) }
+                let health = HealthCheck.run(project: project, contexts: result,
+                                             servers: servers.values.flatMap { $0 })
+                // Keep a version of every file as it is now, so changes made
+                // by the agents themselves show up in each file's history.
+                for url in Set(result.flatMap { $0.entries.map(\.url) }) where url.isFileURL {
+                    History.shared.observe(url)
+                }
+                return (result, servers, sharing, health)
             }.value
             guard !Task.isCancelled else { return }
             contexts = result
+            self.servers = servers
+            self.sharing = sharing
+            self.health = health
             isResolving = false
             if let current = selectedEntry {
                 let all = result.flatMap { $0.entries + $0.skills.map(\.entry) }
@@ -118,6 +141,26 @@ final class AppModel {
                     ?? (FileManager.default.fileExists(atPath: current.url.path) ? current : nil)
             }
         }
+    }
+
+    /// Applies a reviewed change, then opens its first file.
+    func apply(_ change: ChangeSet) throws {
+        try change.apply()
+        pendingChange = nil
+        if let first = change.edits.first {
+            selectedEntry = ContextEntry(agent: contexts.first { ctx in ctx.entries.contains { $0.url == first.url } }?.agent
+                                            ?? .claudeCode,
+                                         url: first.url, scope: .project, timing: .launch)
+        }
+        resolve()
+    }
+
+    /// Applies a small change the user made directly, like flipping a
+    /// switch, without a preview. It is still checked for conflicts and
+    /// kept in History.
+    func applyNow(_ change: ChangeSet) throws {
+        try change.apply()
+        resolve()
     }
 
     nonisolated private static func contexts(for place: Place) -> [ResolvedContext] {

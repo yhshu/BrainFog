@@ -76,6 +76,58 @@ public struct CopyPlan: Sendable, Equatable {
             header = scope.isEmpty
                 ? "---\ndescription: Copied from \(source.lastPathComponent)\nalwaysApply: true\n---\n\n"
                 : "---\ndescription: Copied from \(source.lastPathComponent)\nglobs: \(scope.joined(separator: ", "))\nalwaysApply: false\n---\n\n"
+        case .geminiCLI:
+            destination = (project ?? GeminiResolver.home(env).appendingPathComponent(".gemini")).appendingPathComponent("GEMINI.md")
+            mode = .append
+            sharedWith = []
+            lostScope = scope
+        case .copilot:
+            guard let project else {
+                destination = env.home.appendingPathComponent(".copilot/copilot-instructions.md")
+                mode = .append
+                sharedWith = []
+                lostScope = scope
+                return
+            }
+            var name = source.deletingPathExtension().lastPathComponent
+            if name.hasSuffix(".instructions") { name = String(name.dropLast(".instructions".count)) }
+            if let from { name = "\(from.rawValue)-\(name)" }
+            destination = Self.unused(project.appendingPathComponent(".github/instructions/\(name).instructions.md"))
+            mode = .newFile
+            sharedWith = []
+            header = "---\napplyTo: \"\(scope.isEmpty ? "**" : scope.joined(separator: ","))\"\n---\n\n"
+        case .devin:
+            guard let project else {
+                destination = env.home.appendingPathComponent(".config/devin/AGENTS.md")
+                mode = .append
+                sharedWith = []
+                lostScope = scope
+                return
+            }
+            var name = source.deletingPathExtension().lastPathComponent
+            if let from { name = "\(from.rawValue)-\(name)" }
+            destination = Self.unused(project.appendingPathComponent(".devin/rules/\(name).md"))
+            mode = .newFile
+            sharedWith = []
+            header = scope.isEmpty ? "---\ntrigger: always_on\n---\n\n"
+                : "---\ntrigger: glob\nglobs: \(scope.joined(separator: ", "))\n---\n\n"
+        case .cline:
+            let rules = project?.appendingPathComponent(".clinerules")
+                ?? env.home.appendingPathComponent("Documents/Cline/Rules")
+            sharedWith = []
+            if FileSupport.isFile(rules) {
+                destination = rules
+                mode = .append
+                lostScope = scope
+                return
+            }
+            var name = source.deletingPathExtension().lastPathComponent
+            if let from { name = "\(from.rawValue)-\(name)" }
+            destination = Self.unused(rules.appendingPathComponent("\(name).md"))
+            mode = .newFile
+            if !scope.isEmpty {
+                header = "---\npaths:\n" + scope.map { "  - \"\($0)\"\n" }.joined() + "---\n\n"
+            }
         }
     }
 
@@ -88,30 +140,29 @@ public struct CopyPlan: Sendable, Equatable {
             !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } ?? false
         if !codexOverridden { agents.append(.codex) }
-        agents += [.openCode, .cursor]
+        agents += [.openCode, .cursor, .copilot, .devin, .cline]
         return agents.filter { $0 != agent }
     }
 
-    /// Carries the copy out. Never overwrites: new files get a free name and
-    /// appends keep the existing text.
-    public func apply(text: String, source: URL) throws {
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
+    /// The copy as a file edit. Never overwrites: new files get a free name
+    /// and appends keep the existing text.
+    public func edit(text: String, source: URL) -> FileEdit {
         switch mode {
         case .newFile:
             let body = header.isEmpty ? text : Frontmatter.split(text).body
-            try (header + body).write(to: destination, atomically: true, encoding: .utf8)
+            return FileEdit(url: destination, before: nil, after: header + body)
         case .append:
-            var existing = FileSupport.read(destination) ?? ""
-            if !existing.isEmpty && !existing.hasSuffix("\n") { existing += "\n" }
-            let separator = existing.isEmpty ? "" : "\n"
             // Frontmatter means nothing in the middle of AGENTS.md.
             var body = Frontmatter.split(text).body
             if body.hasPrefix("\n") { body.removeFirst() }
             if !body.hasSuffix("\n") { body += "\n" }
-            try (existing + separator + "<!-- Copied from \(source.path) -->\n" + body)
-                .write(to: destination, atomically: true, encoding: .utf8)
+            return FileEdit.append("<!-- Copied from \(source.path) -->\n" + body, to: destination)
         }
+    }
+
+    /// Carries the copy out.
+    public func apply(text: String, source: URL, history: History = .shared) throws {
+        try ChangeSet(title: "", detail: "", edits: [edit(text: text, source: source)]).apply(history: history)
     }
 
     private static func unused(_ url: URL) -> URL {

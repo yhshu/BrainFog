@@ -65,6 +65,57 @@ public struct NewFileOption: Identifiable, Sendable, Hashable {
                       url: project.appendingPathComponent("AGENTS.md"), needsName: false),
                 rule,
             ]
+        case .geminiCLI:
+            return [project.map {
+                .init(title: "GEMINI.md", detail: "Read by Gemini CLI in this project",
+                      url: $0.appendingPathComponent("GEMINI.md"), needsName: false)
+            } ?? .init(title: "GEMINI.md", detail: "Instructions for every project; the agent saves global notes here too",
+                       url: GeminiResolver.home(env).appendingPathComponent(".gemini/GEMINI.md"), needsName: false)]
+        case .copilot:
+            guard let project else {
+                return [.init(title: "copilot-instructions.md", detail: "Personal instructions for Copilot CLI",
+                              url: env.home.appendingPathComponent(".copilot/copilot-instructions.md"), needsName: false)]
+            }
+            var scoped = NewFileOption(title: "Instructions File…", detail: "Applied to the files its applyTo matches",
+                                       url: project.appendingPathComponent(".github/instructions"), needsName: true)
+            scoped.fileExtension = "instructions.md"
+            scoped.template = "---\napplyTo: \"**\"\n---\n\n"
+            return [
+                .init(title: "copilot-instructions.md", detail: "Applied to every request in this repository",
+                      url: project.appendingPathComponent(".github/copilot-instructions.md"), needsName: false),
+                .init(title: "AGENTS.md", detail: "Also read by other agents",
+                      url: project.appendingPathComponent("AGENTS.md"), needsName: false),
+                scoped,
+            ]
+        case .devin:
+            guard let project else {
+                return [.init(title: "AGENTS.md", detail: "Instructions for every workspace",
+                              url: env.home.appendingPathComponent(".config/devin/AGENTS.md"), needsName: false)]
+            }
+            var rule = NewFileOption(title: "Rule File…", detail: "Applied to every session in this workspace",
+                                     url: project.appendingPathComponent(".devin/rules"), needsName: true)
+            rule.template = "---\ntrigger: always_on\n---\n\n"
+            return [
+                .init(title: "AGENTS.md", detail: "Also read by other agents",
+                      url: project.appendingPathComponent("AGENTS.md"), needsName: false),
+                .init(title: "AGENTS.local.md", detail: "Just for you; add it to .gitignore",
+                      url: project.appendingPathComponent("AGENTS.local.md"), needsName: false),
+                rule,
+            ]
+        case .cline:
+            let globalRule = NewFileOption(title: "Rule File…", detail: "Applied in every workspace",
+                                           url: env.home.appendingPathComponent("Documents/Cline/Rules"), needsName: true)
+            guard let project else { return [globalRule] }
+            // A plain .clinerules file can't hold a folder of rules.
+            let rules = project.appendingPathComponent(".clinerules")
+            if FileSupport.isFile(rules) {
+                return [.init(title: ".clinerules", detail: "This workspace’s rules", url: rules, needsName: false)]
+            }
+            return [
+                .init(title: "AGENTS.md", detail: "Also read by other agents",
+                      url: project.appendingPathComponent("AGENTS.md"), needsName: false),
+                .init(title: "Rule File…", detail: "Applied in this workspace", url: rules, needsName: true),
+            ]
         }
     }
 

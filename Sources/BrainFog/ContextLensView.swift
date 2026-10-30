@@ -3,46 +3,105 @@ import SwiftUI
 import BrainFogCore
 
 enum LensMode: String, CaseIterable {
-    case context, skills
-    var title: String { self == .context ? "Instructions & Memory" : "Skills" }
-    var symbol: String { self == .context ? "text.book.closed" : "puzzlepiece.extension" }
+    case context, skills, mcp
+    var title: String {
+        switch self {
+        case .context: "Instructions & Memory"
+        case .skills: "Skills"
+        case .mcp: "MCP Servers"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .context: "text.book.closed"
+        case .skills: "puzzlepiece.extension"
+        case .mcp: "point.3.connected.trianglepath.dotted"
+        }
+    }
 }
 
 /// What each agent loads for the selected place, one section per agent.
 struct ContextLensView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("lensMode") private var mode = LensMode.context
+    /// The agent whose section fills the top of the view with its own
+    /// header scrolled away, so a pinned copy of the header says whose it is.
+    @State private var pinned: AgentID?
+    /// Window y of the top of the visible area, below the toolbar.
+    @State private var visibleTop: CGFloat = 0
+    @State private var scroll = ScrollPosition()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                header
-                // One full-width section per agent, stacked top to bottom.
-                GlassEffectContainer(spacing: 16) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(model.contexts, id: \.agent) { ctx in
-                            AgentSection(context: ctx, mode: mode)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    header
+                    if mode == .context {
+                        if let sharing = model.sharing { SharingCard(report: sharing) }
+                        if !model.health.isEmpty { HealthCard(issues: model.health) }
+                    }
+                    // One full-width section per agent, stacked top to bottom.
+                    GlassEffectContainer(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(model.contexts, id: \.agent) { ctx in
+                                AgentSection(context: ctx, mode: mode)
+                                    .id(ctx.agent)
+                                    .onGeometryChange(for: Bool.self) { geo in
+                                        // Its title row is out of sight but the rest isn't.
+                                        let f = geo.frame(in: .global)
+                                        return f.minY < visibleTop - 44 && f.maxY > visibleTop + 80
+                                    } action: { covers in
+                                        if covers { pinned = ctx.agent } else if pinned == ctx.agent { pinned = nil }
+                                    }
+                            }
                         }
                     }
                 }
+                .padding(24)
             }
-            .padding(24)
+            .scrollPosition($scroll)
+            .onAppear {
+                // Development aid for BRAINFOG_SNAPSHOT: start scrolled down.
+                if let y = ProcessInfo.processInfo.environment["BRAINFOG_SNAPSHOT_Y"].flatMap(Double.init) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { scroll.scrollTo(y: y) }
+                }
+            }
+            .overlay(alignment: .top) {
+                ZStack(alignment: .top) {
+                    Color.clear.frame(height: 0)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { visibleTop = $0 }
+                    if let agent = pinned, let ctx = model.contexts.first(where: { $0.agent == agent }) {
+                        PinnedAgentHeader(context: ctx, summary: pinnedSummary(ctx)) {
+                            withAnimation { proxy.scrollTo(agent, anchor: .top) }
+                        }
+                        .padding(.horizontal, 24).padding(.top, 6)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.15), value: pinned)
+            }
+            .onChange(of: mode) { pinned = nil }
+            .onChange(of: model.selection) { pinned = nil }
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(backdrop)
         .navigationTitle(model.selection?.title ?? "BrainFog")
         .toolbar(removing: .title)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("View", selection: $mode) {
-                    ForEach(LensMode.allCases, id: \.self) {
-                        Label($0.title, systemImage: $0.symbol).help($0.title).tag($0)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelStyle(.iconOnly)
-                .fixedSize()
+            ToolbarItem(placement: .navigation) {
+                ModeSwitcher(mode: $mode)
             }
+        }
+    }
+
+    private func pinnedSummary(_ ctx: ResolvedContext) -> String {
+        switch mode {
+        case .context:
+            "\(ctx.entries.count) \(ctx.entries.count == 1 ? "file" : "files") · about \(ctx.launchTokens.tokenLabel) tokens at launch"
+        case .skills:
+            "\(ctx.skills.count) \(ctx.skills.count == 1 ? "skill" : "skills")"
+        case .mcp:
+            "\((model.servers[ctx.agent] ?? []).count) MCP \((model.servers[ctx.agent] ?? []).count == 1 ? "server" : "servers")"
         }
     }
 
@@ -52,12 +111,14 @@ struct ContextLensView: View {
         case (.context, false): "What each agent reads when started in this folder, in the order it enters the context."
         case (.skills, true): "Skills available to each agent in every project."
         case (.skills, false): "Skills each agent can use when started in this folder, including global ones."
+        case (.mcp, true): "MCP servers each agent can use in every project."
+        case (.mcp, false): "MCP servers each agent can use in this folder. Right-click one to copy it to another agent."
         }
     }
 
     private var subtitle: String {
         if case .project(let url) = model.selection { return url.path }
-        return "Your home folder settings for Claude Code, Codex, OpenCode, and Cursor"
+        return "Your home folder settings for every agent"
     }
 
     @ViewBuilder private var header: some View {
@@ -94,6 +155,7 @@ struct ContextLensView: View {
 struct AgentSection: View {
     @Environment(AppModel.self) private var model
     @State private var showUnused = false
+    @State private var addingServer = false
     @State private var showGlobalSkills = false
     @State private var isDropTarget = false
     @State private var pendingCopy: PendingCopy?
@@ -134,7 +196,15 @@ struct AgentSection: View {
     /// comma-separated raw values.
     @AppStorage("collapsedAgents") private var collapsedAgents = ""
 
-    private var hasItems: Bool { mode == .context ? !context.entries.isEmpty : !context.skills.isEmpty }
+    private var servers: [MCPServer] { model.servers[context.agent] ?? [] }
+
+    private var hasItems: Bool {
+        switch mode {
+        case .context: !context.entries.isEmpty
+        case .skills: !context.skills.isEmpty
+        case .mcp: !servers.isEmpty
+        }
+    }
     private var isCollapsed: Bool { hasItems && collapsedAgents.split(separator: ",").contains(Substring(context.agent.rawValue)) }
 
     private func toggleCollapsed() {
@@ -148,6 +218,10 @@ struct AgentSection: View {
         if mode == .skills {
             let n = context.skills.count
             return "\(n) \(n == 1 ? "skill" : "skills")"
+        }
+        if mode == .mcp {
+            let n = servers.count
+            return "\(n) \(n == 1 ? "server" : "servers")"
         }
         let n = context.entries.count
         return "\(n) \(n == 1 ? "file" : "files") · about \(context.launchTokens.tokenLabel) tokens at launch"
@@ -175,10 +249,19 @@ struct AgentSection: View {
                 .buttonStyle(.plain)
                 .allowsHitTesting(hasItems)
                 .help(isCollapsed ? "Show \(context.agent.displayName)’s files" : "Fold \(context.agent.displayName)’s section")
-                if mode == .skills || !newFileOptions.isEmpty || !globalFileOptions.isEmpty { addMenu }
+                if mode == .mcp {
+                    Button("New", systemImage: "plus") { addingServer = true }
+                        .help("Add an MCP server to \(context.agent.displayName)")
+                } else if mode == .skills || !newFileOptions.isEmpty || !globalFileOptions.isEmpty {
+                    addMenu
+                }
             }
             if !isCollapsed {
-                if mode == .context { contextGroups } else { skillGroups }
+                switch mode {
+                case .context: contextGroups
+                case .skills: skillGroups
+                case .mcp: serverGroups
+                }
             }
             ForEach(context.diagnostics.filter { $0.severity != .info }) { DiagnosticRow(diagnostic: $0) }
         }
@@ -186,13 +269,8 @@ struct AgentSection: View {
         .dropDestination(for: URL.self) { urls, _ in
             mode == .context && prepareCopy(urls)
         } isTargeted: { isDropTarget = $0 && mode == .context }
-        .confirmationDialog(copyTitle, isPresented: Binding(
-            get: { pendingCopy != nil }, set: { if !$0 { pendingCopy = nil } }
-        ), titleVisibility: .visible) {
-            Button("Copy") { performCopy() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(copyMessage)
+        .sheet(isPresented: $addingServer) {
+            ServerForm(agent: context.agent, project: project, existing: nil)
         }
         .alert(namePrompt?.title ?? "", isPresented: Binding(
             get: { namePrompt != nil }, set: { if !$0 { namePrompt = nil } }
@@ -404,6 +482,15 @@ struct AgentSection: View {
         }
     }
 
+    // MARK: MCP servers
+
+    @ViewBuilder private var serverGroups: some View {
+        if servers.isEmpty {
+            NoteText(text: "No MCP servers. Use New to add one, or right-click a server under another agent to copy it here.")
+        }
+        ForEach(servers) { ServerRow(server: $0) }
+    }
+
     // MARK: Copying a dropped file to this agent
 
     /// Accepts one local file that this agent doesn't already read.
@@ -416,8 +503,12 @@ struct AgentSection: View {
         let from = model.contexts.first { ctx in
             ctx.entries.contains { $0.url.standardizedFileURL == source.standardizedFileURL }
         }?.agent
-        guard let plan = CopyPlan(source: source, to: context.agent, project: project, from: from) else { return false }
+        guard let plan = CopyPlan(source: source, to: context.agent, project: project, from: from),
+              let text = try? String(contentsOf: source, encoding: .utf8) else { return false }
         pendingCopy = PendingCopy(source: source, plan: plan)
+        model.pendingChange = ChangeSet(title: copyTitle, detail: copyMessage,
+                                        edits: [plan.edit(text: text, source: source)])
+        pendingCopy = nil
         return true
     }
 
@@ -444,17 +535,6 @@ struct AgentSection: View {
         return text + " The original file is not changed."
     }
 
-    private func performCopy() {
-        guard let pending = pendingCopy else { return }
-        pendingCopy = nil
-        do {
-            let text = try String(contentsOf: pending.source, encoding: .utf8)
-            try pending.plan.apply(text: text, source: pending.source)
-            model.resolve()
-        } catch {
-            copyError = error.localizedDescription
-        }
-    }
 }
 
 /// The glass card behind each agent section, lit up while a file is dragged over it.
@@ -722,5 +802,178 @@ struct DiagnosticRow: View {
         case .warning: .orange
         case .error: .red
         }
+    }
+}
+
+struct ServerRow: View {
+    @Environment(AppModel.self) private var model
+    @State private var error: String?
+    @State private var editing = false
+    let server: MCPServer
+
+    var body: some View {
+        Button {
+            model.whenEditsAreSafe {
+                model.selectedEntry = ContextEntry(agent: server.agent, url: server.file, scope: server.scope, timing: .launch)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Image(systemName: server.isRemote ? "network" : "terminal")
+                        .foregroundStyle(server.agent.tint).frame(width: 18)
+                    Text(server.name).font(.body.weight(.medium))
+                    ScopeChip(scope: server.scope)
+                    if !server.secretKeys.isEmpty {
+                        Image(systemName: "key.fill").font(.caption).foregroundStyle(.orange)
+                            .help("Holds credentials directly: \(server.secretKeys.joined(separator: ", "))")
+                    }
+                    Spacer(minLength: 0)
+                }
+                Text(server.summary).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Text(([displayPath(server.file)] + [server.note].compactMap { $0 }).joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .contentShape(.rect(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 14))
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 2) {
+                Toggle("On", isOn: Binding(get: { server.enabled }, set: { setEnabled($0) }))
+                    .toggleStyle(.switch).labelsHidden().controlSize(.mini)
+                    .disabled(!server.canSwitch)
+                    .help(server.canSwitch ? (server.enabled ? "On: turn off for new sessions" : "Off: turn on for new sessions")
+                                           : (MCPEdit.Failure.noSwitch(server).errorDescription ?? ""))
+                    .padding(.trailing, 6)
+                Button("Edit", systemImage: "pencil") { editing = true }
+                    .disabled(!server.editable)
+                    .help(server.editable ? "Change this server" : notEditable)
+                Button("Remove", systemImage: "trash") { remove() }
+                    .help(server.editable ? "Remove this server" : notEditable)
+                    .disabled(!server.editable)
+            }
+            .labelStyle(.iconOnly).buttonStyle(.borderless).controlSize(.small)
+            .padding(8)
+        }
+        .opacity(server.enabled ? 1 : 0.55)
+        .help("Click to open its config file. Right-click to copy it to another agent.")
+        .contextMenu {
+            Button(server.enabled ? "Turn Off" : "Turn On") { setEnabled(!server.enabled) }
+                .disabled(!server.canSwitch)
+            Button("Edit…") { editing = true }.disabled(!server.editable)
+            Button("Remove…") { remove() }.disabled(!server.editable)
+            if !server.editable, server.file.lastPathComponent == ".claude.json" {
+                Button("Copy `claude mcp remove` Command") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(MCPCopy.claudeRemoveCommand(for: server), forType: .string)
+                }
+            }
+            Divider()
+            Menu("Copy to") {
+                ForEach(AgentID.allCases.filter { $0 != server.agent }) { agent in
+                    Button(agent.displayName) { copy(to: agent) }
+                }
+            }
+            Button("Copy `claude mcp add-json` Command") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(MCPCopy.claudeCommand(for: server), forType: .string)
+            }
+            Divider()
+            Button("Show Config in Finder") { NSWorkspace.shared.activateFileViewerSelecting([server.file]) }
+        }
+        .sheet(isPresented: $editing) {
+            ServerForm(agent: server.agent, project: nil, existing: server)
+        }
+        .alert("Couldn’t change the server", isPresented: Binding(
+            get: { error != nil }, set: { if !$0 { error = nil } }
+        )) {} message: {
+            Text(error ?? "")
+        }
+    }
+
+    private var notEditable: String {
+        MCPEdit.Failure.notEditable(server).errorDescription ?? ""
+    }
+
+    private func setEnabled(_ on: Bool) {
+        do {
+            try model.applyNow(MCPEdit.setEnabled(server, on))
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func remove() {
+        do {
+            model.pendingChange = try MCPEdit.remove(server)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func copy(to agent: AgentID) {
+        var project: URL?
+        if case .project(let url) = model.selection { project = url }
+        do {
+            model.pendingChange = try MCPCopy.plan(server, to: agent, project: project)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+/// The header of the agent section being read, kept at the top of the view
+/// while the section's own header is scrolled away. Clicking it goes back to
+/// the start of the section.
+struct PinnedAgentHeader: View {
+    let context: ResolvedContext
+    let summary: String
+    let jump: () -> Void
+
+    var body: some View {
+        Button(action: jump) {
+            HStack(spacing: 10) {
+                AgentIcon(agent: context.agent, size: 24)
+                Text(context.agent.displayName).font(.headline)
+                Text(summary).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .contentShape(.rect(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(context.agent.tint.opacity(0.18)), in: .rect(cornerRadius: 16))
+        .help("Back to the start of \(context.agent.displayName)’s section")
+    }
+}
+
+/// The view switcher in the toolbar. A segmented picker draws dividers
+/// between unselected segments at the leading edge of the toolbar, so this
+/// is a row of icon buttons with the selected one on a capsule.
+struct ModeSwitcher: View {
+    @Binding var mode: LensMode
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(LensMode.allCases, id: \.self) { m in
+                Button {
+                    mode = m
+                } label: {
+                    Image(systemName: m.symbol)
+                        .frame(width: 30, height: 22)
+                        .contentShape(.capsule)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(mode == m ? .primary : .secondary)
+                .background(mode == m ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear), in: .capsule)
+                .help(m.title)
+                .accessibilityLabel(m.title)
+                .accessibilityAddTraits(mode == m ? .isSelected : [])
+            }
+        }
+        .padding(.horizontal, 4)
     }
 }

@@ -14,9 +14,21 @@ struct EditorView: View {
     @State private var loadedModified: Date?
     @State private var error: String?
     @State private var conflict = false
+    /// The History version shown in place of the file, until saved or reverted.
+    @State private var restoring: History.Version?
+    @State private var versions: [History.Version] = []
+    @AppStorage("showProperties") private var showProperties = true
 
     private var isDirty: Bool { text != original }
     private var isGenerated: Bool { entry.agent == .codex && entry.scope == .autoMemory }
+    private var format: RuleFormat? { RuleFormat.detect(entry.url) }
+
+    /// Every agent that reads this file, and when.
+    private var readers: [(AgentID, LoadTiming)] {
+        model.contexts.compactMap { ctx in
+            ctx.entries.first { $0.url.standardizedFileURL == entry.url.standardizedFileURL }.map { (ctx.agent, $0.timing) }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -40,9 +52,20 @@ struct EditorView: View {
                 if let error {
                     Label(error, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red)
                 }
+                if !readers.isEmpty { readerChips.padding(.top, 2) }
+                if let restoring {
+                    Label("Showing the version from \(restoring.date.formatted(date: .abbreviated, time: .shortened)). Save to restore it, or Revert.",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption).foregroundStyle(.blue)
+                }
                 actions.padding(.top, 6)
             }
             .padding(16)
+
+            if let format, entry.url.isFileURL {
+                PropertiesForm(format: format, text: $text, expanded: $showProperties)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+            }
 
             TextEditor(text: $text)
                 .font(.system(.body, design: .monospaced))
@@ -73,11 +96,14 @@ struct EditorView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             Text(status).font(.caption).foregroundStyle(isDirty ? .orange : .secondary)
+            Text(stats).font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                .help(tokenHelp)
             Spacer()
+            historyMenu
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
                 .disabled(!entry.url.isFileURL)
             if !autoSave {
-                Button("Revert") { text = original }
+                Button("Revert") { text = original; restoring = nil }
                     .disabled(!isDirty)
                     .help("Discard unsaved edits")
             }
@@ -89,6 +115,72 @@ struct EditorView: View {
                 .help("Write the file to disk (⌘S)")
         }
         .controlSize(.small)
+    }
+
+    private var stats: String {
+        let lines = text.isEmpty ? 0 : text.components(separatedBy: "\n").count
+        return "≈\(TokenEstimator.estimate(text).tokenLabel) tokens · \(lines) \(lines == 1 ? "line" : "lines")"
+    }
+
+    private var readerChips: some View {
+        FlowLayout(spacing: 4) {
+            Text("Read by").font(.caption).foregroundStyle(.secondary)
+            ForEach(readers, id: \.0) { agent, timing in
+                HStack(spacing: 3) {
+                    Circle().fill(agent.tint).frame(width: 6, height: 6)
+                    Text(agent.displayName)
+                }
+                .font(.caption)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.quaternary.opacity(timing.isLoadedAtLaunch ? 0.8 : 0.35), in: .capsule)
+                .opacity({ if case .skipped = timing { 0.5 } else { 1 } }())
+                .help(timingHelp(timing))
+            }
+        }
+    }
+
+    private func timingHelp(_ timing: LoadTiming) -> String {
+        switch timing {
+        case .launch: "Every session"
+        case .onDemand(let why): why.prefix(1).capitalized + why.dropFirst()
+        case .skipped(let why): "Not read: " + why
+        }
+    }
+
+    /// Earlier versions of this file, newest first; picking one loads it
+    /// into the editor without saving.
+    private var historyMenu: some View {
+        Menu {
+            if versions.count <= 1 {
+                Text("No earlier versions yet")
+            }
+            ForEach(versions.dropFirst()) { version in
+                Button {
+                    if let old = History.shared.text(of: version) {
+                        text = old
+                        restoring = version
+                    }
+                } label: {
+                    Text(version.date.formatted(date: .abbreviated, time: .shortened))
+                    Text(originLabel(version.origin) + " · \(version.bytes.formatted()) bytes")
+                }
+            }
+        } label: {
+            Label("History", systemImage: "clock.arrow.circlepath")
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(!entry.url.isFileURL)
+        .help("Earlier versions of this file")
+        .onAppear { versions = History.shared.versions(of: entry.url) }
+    }
+
+    private func originLabel(_ origin: History.Origin) -> String {
+        switch origin {
+        case .observed: "Changed outside BrainFog"
+        case .brainFog: "Saved in BrainFog"
+        case .beforeChange: "Before a BrainFog change"
+        }
     }
 
     private var status: String {
@@ -111,6 +203,9 @@ struct EditorView: View {
             original = text
             loadedModified = modified()
             error = nil
+            restoring = nil
+            History.shared.observe(entry.url)
+            versions = History.shared.versions(of: entry.url)
         } catch {
             self.error = "Couldn’t read the file: \(error.localizedDescription)"
         }
@@ -122,13 +217,98 @@ struct EditorView: View {
             return
         }
         do {
-            try text.write(to: entry.url, atomically: true, encoding: .utf8)
+            try FileWriter.write(text, to: entry.url)
             original = text
             loadedModified = modified()
             error = nil
+            restoring = nil
+            versions = History.shared.versions(of: entry.url)
             model.resolve()
         } catch {
             self.error = "Couldn’t save: \(error.localizedDescription)"
         }
+    }
+}
+
+/// The frontmatter of a rule or skill file as a small form. Edits go
+/// straight into the text, so the editor below stays the source of truth.
+struct PropertiesForm: View {
+    let format: RuleFormat
+    @Binding var text: String
+    @Binding var expanded: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(format.name).font(.subheadline.weight(.semibold))
+                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Spacer()
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 8) {
+                    ForEach(format.fields) { field in
+                        GridRow {
+                            Text(field.label).font(.callout).foregroundStyle(.secondary)
+                                .gridColumnAlignment(.trailing)
+                            control(for: field).help(field.help)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 12))
+    }
+
+    private func binding(_ field: RuleFormat.Field) -> Binding<String> {
+        Binding(get: { RuleFormat.value(of: field, in: text) },
+                set: { text = RuleFormat.setting(field, to: $0, in: text) })
+    }
+
+    @ViewBuilder private func control(for field: RuleFormat.Field) -> some View {
+        switch field.kind {
+        case .bool:
+            Toggle(field.help, isOn: Binding(get: { binding(field).wrappedValue == "true" },
+                                             set: { binding(field).wrappedValue = $0 ? "true" : "false" }))
+                .toggleStyle(.checkbox).font(.callout)
+        case .choice(let options):
+            Picker("", selection: binding(field)) {
+                Text("—").tag("")
+                ForEach(options, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden().fixedSize()
+        case .text, .list, .commaText:
+            DraftField(field: field, text: $text)
+        }
+    }
+}
+
+/// A text field that writes into the frontmatter on Return or when it loses
+/// focus, so a half-typed list isn't rewritten under the cursor.
+private struct DraftField: View {
+    let field: RuleFormat.Field
+    @Binding var text: String
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(field.help, text: $draft)
+            .textFieldStyle(.roundedBorder).font(.callout)
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { if !focused { commit() } }
+            .onChange(of: text, initial: true) { if !focused { draft = RuleFormat.value(of: field, in: text) } }
+    }
+
+    private func commit() {
+        let new = RuleFormat.setting(field, to: draft, in: text)
+        if new != text { text = new }
     }
 }

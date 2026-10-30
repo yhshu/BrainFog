@@ -63,7 +63,7 @@ import Testing
         // No CLAUDE.md anywhere, so Claude Code reads AGENTS.md too.
         let plan = CopyPlan(source: s.root.appendingPathComponent("notes.md"), to: .codex,
                             project: s.project, from: nil, environment: s.env())!
-        try plan.apply(text: "x", source: s.root.appendingPathComponent("notes.md"))
+        try plan.apply(text: "x", source: s.root.appendingPathComponent("notes.md"), history: s.history)
         let claude = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
         let readsIt = claude.entries.contains { $0.url == plan.destination && $0.timing.isLoadedAtLaunch }
         #expect(!readsIt || plan.sharedWith.contains(.claudeCode))
@@ -75,7 +75,7 @@ import Testing
         try s.write(".claude/rules/src.md", text, in: s.project)
         let src = s.project.appendingPathComponent(".claude/rules/src.md")
         let plan = CopyPlan(source: src, to: .codex, project: s.project, from: .claudeCode, environment: s.env())!
-        try plan.apply(text: text, source: src)
+        try plan.apply(text: text, source: src, history: s.history)
         let written = FileSupport.read(plan.destination) ?? ""
         // The frontmatter means nothing to Codex; it lands mid-file as text.
         #expect(!written.contains("paths:"))
@@ -87,7 +87,7 @@ import Testing
         try s.write(".cursor/rules/style.mdc", text, in: s.project)
         let src = s.project.appendingPathComponent(".cursor/rules/style.mdc")
         let plan = CopyPlan(source: src, to: .claudeCode, project: s.project, from: .cursor, environment: s.env())!
-        try plan.apply(text: text, source: src)
+        try plan.apply(text: text, source: src, history: s.history)
         let ctx = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
         let copy = ctx.entries.first { $0.url == plan.destination }
         #expect(copy?.timing == .onDemand("when Claude reads or edits files matching *.swift, *.m"))
