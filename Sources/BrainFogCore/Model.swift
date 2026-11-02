@@ -21,9 +21,11 @@ public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
         case .codex: "Codex"
         case .openCode: "OpenCode"
         case .cursor: "Cursor"
-        case .geminiCLI: "Gemini CLI"
+        // Gemini CLI, Antigravity and Antigravity CLI share ~/.gemini.
+        case .geminiCLI: "Gemini"
         case .copilot: "GitHub Copilot"
-        case .devin: "Devin Desktop"
+        // Devin Desktop (formerly Windsurf) and Devin CLI read the same files.
+        case .devin: "Devin"
         case .cline: "Cline"
         }
     }
@@ -46,7 +48,9 @@ extension AgentID {
         case .codex: [dir("CODEX_HOME", ".codex")]
         case .cursor: [env.home.appendingPathComponent(".cursor").path]
         case .copilot: [dir("COPILOT_HOME", ".copilot")] + editors.prefix(2).map { $0 + "github.copilot-chat" }
-        case .geminiCLI: [GeminiResolver.home(env).appendingPathComponent(".gemini").path]
+        case .geminiCLI: [GeminiResolver.home(env).appendingPathComponent(".gemini").path,
+                          env.home.appendingPathComponent(".antigravity").path,
+                          env.home.appendingPathComponent("Library/Application Support/Antigravity").path]
         case .openCode: [dir("XDG_CONFIG_HOME", ".config") + "/opencode",
                          env.home.appendingPathComponent(".local/share/opencode").path]
         case .cline: [env.home.appendingPathComponent(".cline").path,

@@ -9,7 +9,9 @@ struct BrainFogApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("BrainFog") {
+        // A single window: a second one would share the model but keep its
+        // own editor, so closing it would clear the other's unsaved state.
+        Window("BrainFog", id: "main") {
             ContentView()
                 .environment(model)
                 .onAppear { delegate.model = model }
@@ -17,17 +19,44 @@ struct BrainFogApp: App {
         }
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .importExport) {
-                Button("Import Agent Pack…") { model.importPack() }
-                    .keyboardShortcut("i", modifiers: [.command, .shift])
-                Button("Export Agent Pack…") { model.exportPack() }
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
-            }
+            SidebarCommands()
+            CommandGroup(replacing: .importExport) { PackMenuItems(model: model) }
             CommandGroup(after: .toolbar) {
                 Button("Reload Files") { model.reloadProjects(); model.resolve() }
                     .keyboardShortcut("r")
+                GlobalItemsToggle(model: model)
             }
         }
+    }
+}
+
+// Menu items that read the model are views of their own, so a change only
+// updates them. Read in `commands` itself, every change (a refresh starting
+// as the app comes forward, say) rebuilds the menus, and the View menu loses
+// the Enter Full Screen item AppKit adds to it.
+
+private struct PackMenuItems: View {
+    let model: AppModel
+
+    var body: some View {
+        // Not while a change is under review, which importing would
+        // replace, nor while the page is still loading, so a pack
+        // never mixes one page's name with another's files.
+        Button("Import Agent Pack…") { model.importPack() }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+            .disabled(model.pendingChange != nil)
+        Button("Export Agent Pack…") { model.exportPack() }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+            .disabled(model.isResolving || model.pendingChange != nil)
+    }
+}
+
+private struct GlobalItemsToggle: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Toggle("Show Global Items in Projects", isOn: $model.showGlobalInProjects)
+            .keyboardShortcut("g", modifiers: [.command, .shift])
     }
 }
 
@@ -38,7 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Quitting with the editor dirty asks first, like closing it does.
     @MainActor func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard model?.hasUnsavedEdits == true, NSApp.windows.contains(where: \.isVisible) else { return .terminateNow }
+        guard model?.hasUnsavedEdits == true,
+              NSApp.isHidden || NSApp.windows.contains(where: { $0.isVisible || $0.isMiniaturized }) else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "Discard unsaved changes?"
         alert.informativeText = "The file in the editor has edits that aren’t saved yet."
@@ -130,8 +160,10 @@ struct AgentIcon: View {
         // Windsurf became Devin Desktop and kept its bundle ID.
         case .devin: (bundleID, name) = ("com.exafunction.windsurf", "Devin.app")
         case .cline: (bundleID, name) = ("bot.cline.app", "Cline.app")
-        // These live inside a terminal or VS Code, whose icon would mislead.
-        case .geminiCLI, .copilot:
+        // Antigravity, Google's agentic IDE; the CLIs share its ~/.gemini.
+        case .geminiCLI: (bundleID, name) = ("com.google.antigravity", "Antigravity.app")
+        // Lives inside a terminal or VS Code, whose icon would mislead.
+        case .copilot:
             cache[agent] = .some(nil)
             return nil
         }
@@ -161,10 +193,14 @@ enum InstalledArtwork {
     /// A full-colour icon used instead of the squircle.
     @MainActor static func icon(for agent: AgentID) -> NSImage? {
         guard agent == .cline else { return nil }
+        if let hit = iconCache[agent] { return hit }
         // The Cline extension's marketplace icon.
-        return newest(extension: "saoudrizwan.claude-dev", files: ["assets/icons/icon.png", "assets/icon.png", "icon.png"])
+        let image = newest(extension: "saoudrizwan.claude-dev", files: ["assets/icons/icon.png", "assets/icon.png", "icon.png"])
             .flatMap(NSImage.init(contentsOf:))
+        iconCache[agent] = image
+        return image
     }
+    @MainActor private static var iconCache: [AgentID: NSImage?] = [:]
 
     @MainActor private static func find(_ agent: AgentID) -> NSImage? {
         switch agent {

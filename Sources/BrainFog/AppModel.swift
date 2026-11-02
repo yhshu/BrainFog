@@ -44,6 +44,12 @@ final class AppModel {
     var isResolving = false
     /// The editor has text that isn't on disk yet.
     var hasUnsavedEdits = false
+    /// Whether project pages also list the global files, skills and servers
+    /// every project shares. Off by default, so each project shows only what
+    /// is its own instead of repeating the Global page.
+    var showGlobalInProjects = UserDefaults.standard.bool(forKey: "showGlobalInProjects") {
+        didSet { UserDefaults.standard.set(showGlobalInProjects, forKey: "showGlobalInProjects") }
+    }
     /// What to do once the user agrees to drop unsaved edits.
     var pendingDiscard: (() -> Void)?
     /// Goes up after every resolve, which records new versions in History.
@@ -197,6 +203,29 @@ final class AppModel {
         }
     }
 
+    // MARK: What a page lists
+
+    /// Global items are hidden only on a project page with the setting off.
+    var hidesGlobal: Bool {
+        if case .project = selection { !showGlobalInProjects } else { false }
+    }
+
+    /// The agent's files this page lists.
+    func shownEntries(_ ctx: ResolvedContext) -> [ContextEntry] {
+        guard hidesGlobal, case .project(let url) = selection else { return ctx.entries }
+        let global = Self.globalFiles(ctx.entries, project: url)
+        return ctx.entries.filter { !global.contains($0.url.path) }
+    }
+
+    func shownSkills(_ ctx: ResolvedContext) -> [Skill] {
+        hidesGlobal ? ctx.skills.filter { $0.scope == .project } : ctx.skills
+    }
+
+    func shownServers(_ agent: AgentID) -> [MCPServer] {
+        let all = servers[agent] ?? []
+        return hidesGlobal ? all.filter { ![.managed, .user, .bundled].contains($0.scope) } : all
+    }
+
     // MARK: Agent packs
 
     /// Saves this page's instructions, memory, skills and servers as a
@@ -271,6 +300,29 @@ final class AppModel {
         resolve()
     }
 
+    /// The paths among `entries` that belong to the machine-wide layer every
+    /// project shares, not to any one folder. `project`, when given, owns
+    /// everything inside it.
+    nonisolated static func globalFiles(_ entries: [ContextEntry], project: URL? = nil) -> Set<String> {
+        let claudeHome = ResolverEnvironment.defaultHome.appendingPathComponent(".claude").path + "/"
+        let inside = project.map { $0.standardizedFileURL.path + "/" }
+        // Imports come right after the file that pulls them in, so one
+        // pass keeps every import of a kept file, wherever it lives.
+        var kept = Set<String>()
+        for e in entries {
+            if let inside, e.url.standardizedFileURL.path.hasPrefix(inside) { continue }
+            let keep = switch e.scope {
+            case .managed, .user, .bundled: true
+            case .rule: e.url.path.hasPrefix(claudeHome)
+            case .imported: e.importedBy.map { kept.contains($0.path) } ?? false
+            case .autoMemory: e.agent == .codex
+            default: false
+            }
+            if keep { kept.insert(e.url.path) }
+        }
+        return kept
+    }
+
     nonisolated private static func contexts(for place: Place) -> [ResolvedContext] {
         switch place {
         case .project(let url):
@@ -283,23 +335,10 @@ final class AppModel {
             // Resolve from an empty folder so only machine-wide layers remain.
             let probe = FileManager.default.temporaryDirectory.appendingPathComponent("brainfog-global-probe")
             try? FileManager.default.createDirectory(at: probe, withIntermediateDirectories: true)
-            let claudeHome = ResolverEnvironment.defaultHome.appendingPathComponent(".claude").path + "/"
             return Resolvers.resolveAll(workingDirectory: probe).map { ctx in
                 var ctx = ctx
-                // Imports come right after the file that pulls them in, so one
-                // pass keeps every import of a kept file, wherever it lives.
-                var kept = Set<String>()
-                ctx.entries = ctx.entries.filter { e in
-                    let keep = switch e.scope {
-                    case .managed, .user: true
-                    case .rule: e.url.path.hasPrefix(claudeHome)
-                    case .imported: e.importedBy.map { kept.contains($0.path) } ?? false
-                    case .autoMemory: e.agent == .codex
-                    default: false
-                    }
-                    if keep { kept.insert(e.url.path) }
-                    return keep
-                }
+                let global = globalFiles(ctx.entries)
+                ctx.entries = ctx.entries.filter { global.contains($0.url.path) }
                 ctx.skills = SkillResolver.resolve(agent: ctx.agent, workingDirectory: nil)
                 ctx.diagnostics = ctx.diagnostics.filter { !$0.message.contains("Not a git repository") }
                 return ctx

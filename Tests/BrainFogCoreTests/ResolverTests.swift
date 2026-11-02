@@ -233,9 +233,9 @@ final class Sandbox {
         #expect(timing("smart.mdc") == .onDemand("when the agent judges it relevant: Database tips"))
         #expect(timing("manual.mdc") == .onDemand("only when @-mentioned in chat"))
         #expect(timing("plain.md") == .skipped("Cursor only reads .mdc rule files"))
-        #expect(timing("web/AGENTS.md") == .onDemand("when working in web/"))
-        #expect(timing("web/.cursor/rules/ui.mdc") == .onDemand("when working in web/"))
-        #expect(timing("node_modules/x/AGENTS.md") == nil)
+        // Subfolders apply only once Cursor works there, so they aren't listed.
+        #expect(timing("web/AGENTS.md") == nil)
+        #expect(timing("web/.cursor/rules/ui.mdc") == nil)
     }
 
     @Test func newRuleFileIsAlwaysApplied() throws {
@@ -391,17 +391,5 @@ final class Sandbox {
         try s.write("AGENTS.md", "rules", in: s.project)
         let ctx = CodexResolver().resolve(workingDirectory: s.project, environment: s.env())
         #expect(s.names(ctx).isEmpty)
-    }
-
-    @Test func claudeReadsASubfoldersAgentsOnlyWithoutItsOwnClaude() throws {
-        let s = try Sandbox()
-        try s.write("CLAUDE.md", "root", in: s.project)
-        try s.write("api/AGENTS.md", "api", in: s.project)
-        try s.write("web/AGENTS.md", "web", in: s.project)
-        try s.write("web/CLAUDE.md", "web claude", in: s.project)
-        let ctx = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
-        let onDemand = ctx.entries.filter { if case .onDemand = $0.timing { true } else { false } }
-            .map { $0.url.path.replacingOccurrences(of: s.project.path + "/", with: "") }
-        #expect(onDemand.sorted() == ["api/AGENTS.md", "web/CLAUDE.md"])
     }
 }

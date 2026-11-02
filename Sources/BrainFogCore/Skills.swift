@@ -28,7 +28,10 @@ public struct Skill: Identifiable, Sendable, Hashable {
 /// Claude Code https://code.claude.com/docs/en/skills,
 /// Codex https://learn.chatgpt.com/docs/build-skills,
 /// OpenCode https://opencode.ai/docs/skills/,
-/// Cursor https://cursor.com/docs/context/skills.
+/// Cursor https://cursor.com/docs/context/skills,
+/// Gemini CLI https://geminicli.com/docs/cli/skills/,
+/// Antigravity https://antigravity.google/docs/skills,
+/// Copilot https://code.visualstudio.com/docs/copilot/customization/agent-skills.
 public enum SkillResolver {
     /// - Parameter workingDirectory: the project folder, or nil for the
     ///   global layer only.
@@ -36,14 +39,16 @@ public enum SkillResolver {
                                environment env: ResolverEnvironment = .init()) -> [Skill] {
         // Project folders from the repository root (or the folder itself) down.
         var projectDirs: [URL] = []
-        if let cwd = workingDirectory?.standardizedFileURL {
-            let root = FileSupport.gitRoot(of: cwd)
-            projectDirs = root.map { r in FileSupport.ancestors(of: cwd).filter { FileSupport.isWithin($0, r) } } ?? [cwd]
-            projectDirs.removeAll { $0.path == env.home.path }
-        }
         let codexHome = env.variables["CODEX_HOME"].map {
             URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
         } ?? env.home.appendingPathComponent(".codex")
+        let codexConfig = agent == .codex ? workingDirectory.map { CodexConfig(codexHome: codexHome, cwd: $0) } : nil
+        if let cwd = workingDirectory?.standardizedFileURL {
+            // Codex finds the root by its project_root_markers.
+            let root = codexConfig.map { $0.hasRoot(above: cwd) ? $0.root(of: cwd) : cwd } ?? FileSupport.gitRoot(of: cwd)
+            projectDirs = root.map { r in FileSupport.ancestors(of: cwd).filter { FileSupport.isWithin($0, r) } } ?? [cwd]
+            projectDirs.removeAll { $0.path == env.home.path }
+        }
         let copilotHome = env.variables["COPILOT_HOME"].map {
             URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
         } ?? env.home.appendingPathComponent(".copilot")
@@ -51,13 +56,13 @@ public enum SkillResolver {
             ?? env.home.appendingPathComponent(".config")
 
         var found: [Skill] = []
-        func scan(_ dir: URL, _ scope: Scope, note: String? = nil) {
-            for skill in skills(in: dir, agent: agent, scope: scope, note: note)
+        func scan(_ dir: URL, _ scope: Scope, note: String? = nil, recursive: Bool = false, timing: LoadTiming = .launch) {
+            for var skill in skills(in: dir, agent: agent, scope: scope, note: note, recursive: recursive)
             where !found.contains(where: { $0.url.path == skill.url.path }) {
+                skill.timing = timing
                 found.append(skill)
             }
         }
-
         switch agent {
         case .claudeCode:
             // Enterprise > personal > project when names collide.
@@ -65,8 +70,9 @@ public enum SkillResolver {
             scan(env.home.appendingPathComponent(".claude/skills"), .user)
             scan(env.home.appendingPathComponent(".claude/skills/synced"), .user, note: "synced from claude.ai")
             for dir in projectDirs { scan(dir.appendingPathComponent(".claude/skills"), .project) }
+            let shared = found.count
             var seen = Set<String>()
-            for i in found.indices {
+            for i in found.indices.prefix(shared) {
                 if seen.contains(found[i].name) {
                     found[i].timing = .skipped("a higher-priority skill has the same name")
                 }
@@ -78,6 +84,11 @@ public enum SkillResolver {
             scan(codexHome.appendingPathComponent("skills"), .user, note: "older location, still read")
             scan(URL(fileURLWithPath: "/etc/codex/skills"), .managed)
             scan(codexHome.appendingPathComponent("skills/.system"), .bundled, note: "ships with Codex")
+            // Same-named skills are both offered; [[skills.config]] turns one off.
+            let config = codexConfig ?? CodexConfig(file: codexHome.appendingPathComponent("config.toml"))
+            for i in found.indices where config.skillDisabled(name: found[i].name, file: found[i].url) {
+                found[i].timing = .skipped("turned off by [[skills.config]] in config.toml")
+            }
         case .openCode:
             let claudeSkills = !env.flag("OPENCODE_DISABLE_CLAUDE_CODE") && !env.flag("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")
             for dir in projectDirs.reversed() {
@@ -97,30 +108,42 @@ public enum SkillResolver {
                 seen.insert(found[i].name)
             }
         case .cursor:
+            // Cursor walks each skills root for every SKILL.md; folders in
+            // between only group skills.
             for dir in projectDirs.reversed() {
-                scan(dir.appendingPathComponent(".agents/skills"), .project)
-                scan(dir.appendingPathComponent(".cursor/skills"), .project)
-                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code")
-                scan(dir.appendingPathComponent(".codex/skills"), .project, note: "shared with Codex")
+                scan(dir.appendingPathComponent(".agents/skills"), .project, recursive: true)
+                scan(dir.appendingPathComponent(".cursor/skills"), .project, recursive: true)
+                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code", recursive: true)
+                scan(dir.appendingPathComponent(".codex/skills"), .project, note: "shared with Codex", recursive: true)
             }
-            scan(env.home.appendingPathComponent(".agents/skills"), .user)
-            scan(env.home.appendingPathComponent(".cursor/skills"), .user)
-            scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "shared with Claude Code")
-            scan(env.home.appendingPathComponent(".codex/skills"), .user, note: "shared with Codex")
+            scan(env.home.appendingPathComponent(".agents/skills"), .user, recursive: true)
+            scan(env.home.appendingPathComponent(".cursor/skills"), .user, recursive: true)
+            scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "shared with Claude Code", recursive: true)
+            scan(env.home.appendingPathComponent(".codex/skills"), .user, note: "shared with Codex", recursive: true)
             scan(env.home.appendingPathComponent(".cursor/skills-cursor"), .bundled, note: "ships with Cursor")
         case .geminiCLI:
             // Highest precedence first: workspace (cwd only), user, extensions;
             // within a layer .agents beats .gemini.
             let gHome = GeminiResolver.home(env).appendingPathComponent(".gemini")
             if let cwd = projectDirs.last {
-                scan(cwd.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
-                scan(cwd.appendingPathComponent(".gemini/skills"), .project)
+                scan(cwd.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex and Antigravity")
+                scan(cwd.appendingPathComponent(".gemini/skills"), .project, note: "Gemini CLI; Antigravity CLI asks to move it to .agents/skills")
             }
-            scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
-            scan(gHome.appendingPathComponent("skills"), .user)
+            scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "Gemini CLI; shared with Codex")
+            scan(gHome.appendingPathComponent("skills"), .user, note: "Gemini CLI and Antigravity CLI")
             for ext in ((try? FileManager.default.contentsOfDirectory(atPath: gHome.appendingPathComponent("extensions").path)) ?? []).sorted() {
                 scan(gHome.appendingPathComponent("extensions/\(ext)/skills"), .extra, note: "from the \(ext) extension")
             }
+            // Antigravity also reads parent folders up to the repository root.
+            for dir in projectDirs.reversed().dropFirst() {
+                scan(dir.appendingPathComponent(".agents/skills"), .project, note: "parent folder · Antigravity")
+            }
+            for dir in projectDirs.reversed() {
+                scan(dir.appendingPathComponent(".agent/skills"), .project, note: "older Antigravity location, still read")
+            }
+            scan(gHome.appendingPathComponent("config/skills"), .user, note: "Antigravity")
+            scan(gHome.appendingPathComponent("antigravity-cli/skills"), .user, note: "Antigravity CLI")
+            scan(gHome.appendingPathComponent("antigravity/skills"), .user, note: "older Antigravity location, still read")
         case .copilot:
             for dir in projectDirs.reversed() {
                 scan(dir.appendingPathComponent(".github/skills"), .project)
@@ -129,13 +152,15 @@ public enum SkillResolver {
             }
             scan(copilotHome.appendingPathComponent("skills"), .user)
             scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
-            scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "VS Code’s Local agent only")
+            scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "VS Code only; Copilot CLI doesn’t read it")
         case .devin:
+            // read_config_from.claude also brings in Claude Code's skills.
+            let claude = DevinSources(home: env.home, root: projectDirs.first ?? env.home).claude
             for dir in projectDirs.reversed() {
                 scan(dir.appendingPathComponent(".devin/skills"), .project)
                 scan(dir.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
                 scan(dir.appendingPathComponent(".windsurf/skills"), .project, note: "Windsurf location, still read")
-                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "imported from Claude Code")
+                if claude { scan(dir.appendingPathComponent(".claude/skills"), .project, note: "imported from Claude Code") }
                 scan(dir.appendingPathComponent(".github/skills"), .project, note: "imported from Copilot")
             }
             scan(env.home.appendingPathComponent(".config/devin/skills"), .user)
@@ -158,7 +183,7 @@ public enum SkillResolver {
             }
         }
         // Where two folders hold the same skill name, the first one listed wins.
-        if agent != .claudeCode && agent != .openCode {
+        if ![.claudeCode, .openCode, .codex].contains(agent) {
             var seen = Set<String>()
             for i in found.indices {
                 if seen.contains(found[i].name), found[i].timing.isLoadedAtLaunch {
@@ -178,7 +203,8 @@ public enum SkillResolver {
         case .claudeCode: base = (project ?? env.home).appendingPathComponent(".claude/skills")
         case .codex: base = (project ?? env.home).appendingPathComponent(".agents/skills")
         case .cursor: base = (project ?? env.home).appendingPathComponent(".cursor/skills")
-        case .geminiCLI: base = (project ?? env.home).appendingPathComponent(".gemini/skills")
+        // .agents/skills is the one project folder Gemini CLI and Antigravity both read.
+        case .geminiCLI: base = project?.appendingPathComponent(".agents/skills") ?? env.home.appendingPathComponent(".gemini/skills")
         case .copilot: base = project?.appendingPathComponent(".github/skills") ?? env.home.appendingPathComponent(".copilot/skills")
         case .devin: base = project?.appendingPathComponent(".devin/skills") ?? env.home.appendingPathComponent(".config/devin/skills")
         case .cline: base = (project ?? env.home).appendingPathComponent(".cline/skills")
@@ -202,10 +228,12 @@ public enum SkillResolver {
         """
     }
 
-    private static func skills(in dir: URL, agent: AgentID, scope: Scope, note: String?) -> [Skill] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        return names.filter { !$0.hasPrefix(".") }.sorted().compactMap { folder in
-            let file = dir.appendingPathComponent(folder).appendingPathComponent("SKILL.md")
+    private static func skills(in dir: URL, agent: AgentID, scope: Scope, note: String?, recursive: Bool = false) -> [Skill] {
+        let files: [URL] = recursive ? skillFiles(below: dir)
+            : ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+                .map { dir.appendingPathComponent($0).appendingPathComponent("SKILL.md") }
+        return files.compactMap { file in
+            let folder = file.deletingLastPathComponent().lastPathComponent
             guard let text = FileSupport.read(file) else { return nil }
             let meta = frontmatter(text)
             let name = meta["name"].flatMap { $0.isEmpty ? nil : $0 } ?? folder
@@ -213,6 +241,20 @@ public enum SkillResolver {
             return Skill(agent: agent, name: name, description: description,
                          url: file.standardizedFileURL, scope: scope, timing: .launch,
                          tokens: TokenEstimator.estimate(name + " " + description), note: note)
+        }
+    }
+
+    /// Every `<folder>/…/SKILL.md` below `dir`, skipping hidden folders but
+    /// not names like `build` that FileSupport.walk leaves out.
+    private static func skillFiles(below dir: URL, depth: Int = 0) -> [URL] {
+        guard depth < 6 else { return [] }
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        return names.flatMap { name -> [URL] in
+            let sub = dir.appendingPathComponent(name)
+            guard FileSupport.isDirectory(sub) else { return [] }
+            let file = sub.appendingPathComponent("SKILL.md")
+            // A skill folder ends the search; its own subfolders are its files.
+            return FileSupport.isFile(file) ? [file] : skillFiles(below: sub, depth: depth + 1)
         }
     }
 

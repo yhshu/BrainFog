@@ -51,7 +51,8 @@ public struct MCPServer: Identifiable, Sendable, Hashable {
             switch agent {
             case .cline, .devin: return .disabledKey
             case .claudeCode: return file.lastPathComponent == ".mcp.json" ? .claudeSettings : nil
-            case .geminiCLI: return .geminiExcluded
+            // Antigravity's mcp_config.json marks a server `disabled` in place.
+            case .geminiCLI: return file.lastPathComponent == "settings.json" ? .geminiExcluded : .disabledKey
             default: return nil
             }
         }
@@ -70,7 +71,8 @@ public struct MCPServer: Identifiable, Sendable, Hashable {
         let found = [env, headers].flatMap { values in
             values.filter { key, value in
                 !value.isEmpty && !Secrets.onlyReferences(value)
-                    && (Secrets.looksSecret(key: key) || Secrets.looksSecret(value: value))
+                    && (Secrets.looksSecret(key: key) || Secrets.looksSecret(value: value)
+                        || Secrets.urlPassword(in: value) != nil)
             }.keys
         }
         return Set(found).sorted()
@@ -82,8 +84,22 @@ enum Secrets {
         let k = key.lowercased()
         // "pat" only as a word of its own (GITHUB_PAT), not inside PATH.
         let words = k.split { !$0.isLetter && !$0.isNumber }
-        return ["token", "secret", "key", "password", "authorization", "auth", "credential"].contains { k.contains($0) }
+        return ["token", "secret", "key", "password", "authorization", "auth", "credential", "cookie"].contains { k.contains($0) }
             || words.contains("pat")
+    }
+
+    /// Where the literal password of a URL's `user:password@` sits
+    /// (`postgres://admin:pw@host`); nil when there is none or it is a
+    /// reference to a variable.
+    static func urlPassword(in value: String) -> Range<String.Index>? {
+        guard let scheme = value.range(of: "://") else { return nil }
+        let rest = value[scheme.upperBound...]
+        let authority = rest[..<(rest.firstIndex { "/?#".contains($0) } ?? rest.endIndex)]
+        guard let at = authority.lastIndex(of: "@"), let colon = authority[..<at].firstIndex(of: ":") else { return nil }
+        let password = value.index(after: colon)..<at
+        let text = value[password]
+        guard !text.isEmpty, !text.hasPrefix("$"), !text.hasPrefix("{env:") else { return nil }
+        return password
     }
 
     /// Whether `value` is just references to variables (`${T}`, `$T`,
@@ -109,6 +125,7 @@ public enum MCPResolver {
     public static func resolve(agent: AgentID, project: URL?,
                                environment env: ResolverEnvironment = .init()) -> [MCPServer] {
         var found: [MCPServer] = []
+        let gemini = agent == .geminiCLI ? GeminiMCPPolicy(env: env, project: project) : nil
         for location in locations(for: agent, project: project, env: env) {
             guard let text = FileSupport.read(location.file) else { continue }
             let (off, approved) = switchState(agent: agent, location: location, text: text, env: env)
@@ -118,10 +135,32 @@ public enum MCPResolver {
                 if case .codexToml = location.format, !CodexMCPToml.hasTable(server.name, in: text) {
                     server.editable = false
                 }
+                // A bare file gets no wrapper added behind the user's back.
+                if location.bare, case .json(let key) = location.format, JSONC.value(of: key, at: [], in: text) == nil {
+                    server.editable = false
+                    server.note = "written without an mcpServers wrapper; edit it by hand"
+                }
                 server.format = location.format
                 if off.contains(server.name) { server.enabled = false }
                 else if let approved, !approved.contains(server.name) { server.needsApproval = true }
+                // Only Gemini CLI reads settings.json, so only it applies these.
+                if let gemini, location.file.lastPathComponent == "settings.json", let why = gemini.offReason(server.name) {
+                    server.enabled = false
+                    server.note = why
+                }
                 return server
+            }
+        }
+        // Copilot CLI: the file closest to the folder wins a name, and any
+        // project file beats ~/.copilot. VS Code's own files are apart.
+        if agent == .copilot {
+            var winner: [String: URL] = [:]
+            for i in found.indices where found[i].format == .json(key: "mcpServers") {
+                if let file = winner[found[i].name] {
+                    found[i].note = "replaced in Copilot CLI by the server of the same name in \(file.lastPathComponent)"
+                } else {
+                    winner[found[i].name] = found[i].file
+                }
             }
         }
         return found
@@ -137,6 +176,8 @@ public enum MCPResolver {
         var writable = true
         /// The agent whose config this is.
         var agentHint: AgentID
+        /// Whether servers may also sit at the top level, without the key.
+        var bare = false
 
         enum Format: Sendable, Hashable {
             /// `{ "<key>": { name: {command, args, env, url, headers} } }`
@@ -150,7 +191,9 @@ public enum MCPResolver {
         func read(_ text: String, _ location: Location) -> [MCPServer] {
             switch format {
             case .json(let key):
-                guard let json = JSONC.object(from: text), let servers = json[key] as? [String: Any] else { return [] }
+                guard let json = JSONC.object(from: text) else { return [] }
+                if bare, json[key] == nil { return MCPResolver.servers(json, location) }
+                guard let servers = json[key] as? [String: Any] else { return [] }
                 return MCPResolver.servers(servers, location)
             case .claudeUser(let project):
                 guard let json = JSONC.object(from: text) else { return [] }
@@ -254,8 +297,9 @@ public enum MCPResolver {
             ?? home.appendingPathComponent(".config")
         let appSupport = home.appendingPathComponent("Library/Application Support")
         var out: [Location] = []
-        func add(_ file: URL, _ scope: Scope, _ format: Location.Format, note: String? = nil, writable: Bool = true) {
-            out.append(Location(file: file, scope: scope, format: format, note: note, writable: writable, agentHint: agent))
+        func add(_ file: URL, _ scope: Scope, _ format: Location.Format, note: String? = nil, writable: Bool = true,
+                 bare: Bool = false) {
+            out.append(Location(file: file, scope: scope, format: format, note: note, writable: writable, agentHint: agent, bare: bare))
         }
         switch agent {
         case .claudeCode:
@@ -265,46 +309,82 @@ public enum MCPResolver {
             if let project { add(project.appendingPathComponent(".mcp.json"), .project, .json(key: "mcpServers")) }
             add(env.claudeManagedDirectory.appendingPathComponent("managed-mcp.json"), .managed,
                 .json(key: "mcpServers"), writable: false)
+            // https://code.claude.com/docs/en/desktop: the CLI never reads it.
+            add(appSupport.appendingPathComponent("Claude/claude_desktop_config.json"), .user, .json(key: "mcpServers"),
+                note: "Claude desktop app only; it wins a name clash there", writable: false)
         case .codex:
+            // The Codex app, CLI and IDE extension share these files.
             let codexHome = env.variables["CODEX_HOME"].map {
                 URL(fileURLWithPath: FileSupport.expandTilde($0, home: home))
             } ?? home.appendingPathComponent(".codex")
             add(codexHome.appendingPathComponent("config.toml"), .user, .codexToml)
             if let project {
-                add(project.appendingPathComponent(".codex/config.toml"), .project, .codexToml,
-                    note: "used when the project is trusted")
+                // Each .codex/config.toml from the project root down, the
+                // closest winning; only the project folder's own is edited here.
+                let config = CodexConfig(file: codexHome.appendingPathComponent("config.toml"))
+                let root = config.root(of: project)
+                for dir in FileSupport.ancestors(of: project) where FileSupport.isWithin(dir, root) {
+                    let own = dir.path == project.standardizedFileURL.path
+                    let file = dir.appendingPathComponent(".codex/config.toml")
+                    guard own || FileSupport.isFile(file),
+                          file.deletingLastPathComponent().path != codexHome.standardizedFileURL.path else { continue }
+                    let trusted = config.layerTrust(dir, cwd: project)
+                    add(file, .project, .codexToml,
+                        note: (own ? "" : "parent folder; ") + (trusted == true ? "used because the project is trusted"
+                            : trusted == false ? "not used: the project is marked untrusted in Codex"
+                            : "used once the project is trusted in Codex"), writable: own)
+                }
             }
         case .openCode:
-            for name in ["opencode.json", "opencode.jsonc"] {
-                add(configHome.appendingPathComponent("opencode/\(name)"), .user, .openCode)
-            }
-            if let project {
-                for name in ["opencode.json", "opencode.jsonc"] {
-                    add(project.appendingPathComponent(name), .project, .openCode)
-                }
+            for file in OpenCodeResolver.configFiles(project: project, env: env) {
+                add(file.url, file.scope, .openCode, note: file.note, writable: file.writable)
             }
         case .cursor:
             add(home.appendingPathComponent(".cursor/mcp.json"), .user, .json(key: "mcpServers"))
             if let project { add(project.appendingPathComponent(".cursor/mcp.json"), .project, .json(key: "mcpServers")) }
         case .geminiCLI:
-            add(GeminiResolver.home(env).appendingPathComponent(".gemini/settings.json"), .user, .json(key: "mcpServers"))
-            if let project { add(project.appendingPathComponent(".gemini/settings.json"), .project, .json(key: "mcpServers")) }
+            // Gemini CLI first, so copies keep going to its settings.json.
+            let gemini = GeminiResolver.home(env).appendingPathComponent(".gemini")
+            add(gemini.appendingPathComponent("settings.json"), .user, .json(key: "mcpServers"), note: "Gemini CLI")
+            if let project {
+                add(project.appendingPathComponent(".gemini/settings.json"), .project, .json(key: "mcpServers"), note: "Gemini CLI")
+            }
             add(URL(fileURLWithPath: "/Library/Application Support/GeminiCli/settings.json"), .managed,
-                .json(key: "mcpServers"), writable: false)
+                .json(key: "mcpServers"), note: "Gemini CLI", writable: false)
+            // https://antigravity.google/docs/mcp
+            add(gemini.appendingPathComponent("config/mcp_config.json"), .user, .json(key: "mcpServers"),
+                note: "Antigravity and Antigravity CLI")
+            if let project {
+                add(project.appendingPathComponent(".agents/mcp_config.json"), .project, .json(key: "mcpServers"),
+                    note: "Antigravity and Antigravity CLI")
+            }
+            add(gemini.appendingPathComponent("antigravity/mcp_config.json"), .user, .json(key: "mcpServers"),
+                note: "older Antigravity location", writable: false)
         case .copilot:
             let copilotHome = env.variables["COPILOT_HOME"].map {
                 URL(fileURLWithPath: FileSupport.expandTilde($0, home: home))
             } ?? home.appendingPathComponent(".copilot")
-            add(copilotHome.appendingPathComponent("mcp-config.json"), .user, .json(key: "mcpServers"))
-            add(appSupport.appendingPathComponent("Code/User/mcp.json"), .user, .json(key: "servers"),
-                note: "VS Code; passed on to Copilot")
+            // Copilot CLI walks from the folder up to the repository root;
+            // closer files come first, and .mcp.json before .github/mcp.json.
             if let project {
-                add(project.appendingPathComponent(".github/mcp.json"), .project, .json(key: "mcpServers"))
-                add(project.appendingPathComponent(".mcp.json"), .project, .json(key: "mcpServers"),
-                    note: "shared with Claude Code", writable: false)
-                add(project.appendingPathComponent(".vscode/mcp.json"), .project, .json(key: "servers"),
-                    note: "VS Code; passed on to Copilot", writable: false)
+                let root = FileSupport.gitRoot(of: project) ?? project
+                for dir in FileSupport.ancestors(of: project).reversed() where FileSupport.isWithin(dir, root) {
+                    let above = dir.path == project.path ? nil : "parent folder"
+                    add(dir.appendingPathComponent(".mcp.json"), .project, .json(key: "mcpServers"),
+                        note: [above, "Copilot CLI; shared with Claude Code"].compactMap { $0 }.joined(separator: " · "),
+                        writable: false, bare: true)
+                    add(dir.appendingPathComponent(".github/mcp.json"), .project, .json(key: "mcpServers"),
+                        note: above.map { $0 + " · Copilot CLI" } ?? "Copilot CLI", writable: above == nil, bare: true)
+                }
             }
+            add(copilotHome.appendingPathComponent("mcp-config.json"), .user, .json(key: "mcpServers"),
+                note: "Copilot CLI; VS Code discovers it too")
+            if let project {
+                add(project.appendingPathComponent(".vscode/mcp.json"), .project, .json(key: "servers"),
+                    note: "VS Code only; Copilot CLI doesn’t read it", writable: false)
+            }
+            add(appSupport.appendingPathComponent("Code/User/mcp.json"), .user, .json(key: "servers"),
+                note: "VS Code only; Copilot CLI doesn’t read it")
         case .devin:
             add(home.appendingPathComponent(".config/devin/mcp_config.json"), .user, .json(key: "mcpServers"))
             if let project {
@@ -312,8 +392,45 @@ public enum MCPResolver {
                 add(project.appendingPathComponent(".devin/mcp_config.local.json"), .local, .json(key: "mcpServers"),
                     note: "just for you", writable: false)
             }
-            add(home.appendingPathComponent(".codeium/windsurf/mcp_config.json"), .user, .json(key: "mcpServers"),
-                note: "Windsurf’s file, imported by Devin", writable: false)
+            // Other tools' servers, each behind its read_config_from switch,
+            // on by default. All read-only here: they belong to those tools.
+            // https://docs.devin.ai/cli/reference/configuration/read-config-from
+            let sources = DevinSources(home: home, root: project.map { FileSupport.gitRoot(of: $0) ?? $0 } ?? home)
+            if sources.windsurf {
+                add(home.appendingPathComponent(".codeium/windsurf/mcp_config.json"), .user, .json(key: "mcpServers"),
+                    note: "Windsurf’s file, imported by Devin (stable channel)", writable: false)
+            }
+            if sources.claude {
+                if let project {
+                    add(project.appendingPathComponent(".mcp.json"), .project, .json(key: "mcpServers"),
+                        note: "imported from Claude Code", writable: false)
+                    for name in ["settings.json", "settings.local.json"] {
+                        add(project.appendingPathComponent(".claude/\(name)"), .project, .json(key: "mcpServers"),
+                            note: "imported from Claude Code", writable: false)
+                    }
+                }
+                add(home.appendingPathComponent(".claude.json"), .user,
+                    .claudeUser(project: project.map { (FileSupport.gitRoot(of: $0) ?? $0).path }),
+                    note: "imported from Claude Code", writable: false)
+                for name in ["settings.json", "settings.local.json"] {
+                    add(home.appendingPathComponent(".claude/\(name)"), .user, .json(key: "mcpServers"),
+                        note: "imported from Claude Code", writable: false)
+                }
+                add(home.appendingPathComponent(".claude/mcp_servers.json"), .user, .json(key: "mcpServers"),
+                    note: "imported from Claude Code", writable: false, bare: true)
+            }
+            if sources.cursor, let project {
+                add(project.appendingPathComponent(".cursor/mcp.json"), .project, .json(key: "mcpServers"),
+                    note: "imported from Cursor", writable: false)
+            }
+            if sources.openCode {
+                if let project {
+                    add(project.appendingPathComponent("opencode.json"), .project, .openCode,
+                        note: "imported from OpenCode", writable: false)
+                }
+                add(home.appendingPathComponent(".config/opencode/opencode.json"), .user, .openCode,
+                    note: "imported from OpenCode", writable: false)
+            }
         case .cline:
             let data = env.variables["CLINE_DATA_DIR"].map { URL(fileURLWithPath: FileSupport.expandTilde($0, home: home)) }
                 ?? home.appendingPathComponent(".cline/data")
@@ -461,10 +578,7 @@ public enum MCPEdit {
             if old.name != new.name, CodexMCPToml.parse(text).contains(where: { $0.0 == new.name }) {
                 throw Failure.nameTaken(new.name, old.file)
             }
-            let kept = CodexMCPToml.otherLines(of: old.name, in: text)
-            var table = CodexMCPToml.table(for: new)
-            if !kept.isEmpty { table += kept.joined(separator: "\n") + "\n" }
-            after = CodexMCPToml.replacingTable(old.name, with: table, in: text)
+            after = CodexMCPToml.replacing(old.name, with: new, in: text)
         default:
             let key = key(for: format)
             if old.name != new.name, (JSONC.value(of: new.name, at: [key], in: text)) != nil {
@@ -768,15 +882,15 @@ enum CodexMCPToml {
             let line = withoutComment(raw).trimmingCharacters(in: .whitespacesAndNewlines)
             if let key = pendingKey {
                 pending += " " + line
-                if line.contains("]"), let name = current?.name {
+                if depth(pending) <= 0, let name = current?.name {
                     tables[name]?.arrays[key] = strings(in: pending)
                     pendingKey = nil
                 }
                 continue
             }
-            if let parts = headerParts(line) {
-                inServers = parts == ["mcp_servers"]
-                if parts.count >= 2, parts[0] == "mcp_servers" {
+            if let (parts, array) = header(line) {
+                inServers = !array && parts == ["mcp_servers"]
+                if !array, parts.count >= 2, parts[0] == "mcp_servers" {
                     add(parts[1])
                     current = (parts[1], parts.count > 2 ? parts[2] : nil)
                 } else {
@@ -796,7 +910,7 @@ enum CodexMCPToml {
             guard let current else { continue }
             if let sub = current.sub {
                 tables[current.name]?.tables[sub, default: [:]][key] = strings(in: value).first ?? value
-            } else if value.hasPrefix("[") && !value.contains("]") {
+            } else if value.hasPrefix("[") && depth(value) > 0 {
                 pendingKey = key; pending = value
             } else {
                 assign(value, to: key, in: &tables[current.name]!)
@@ -836,6 +950,18 @@ enum CodexMCPToml {
         }
     }
 
+    /// Brackets `s` opens and leaves open, outside strings and comments, so
+    /// a `"]"` inside a string doesn't end a multi-line array.
+    private static func depth(_ s: String) -> Int {
+        let code = withoutComment(s)
+        var n = 0
+        scan(code) { i, quoted in
+            if !quoted { if code[i] == "[" || code[i] == "{" { n += 1 } else if code[i] == "]" || code[i] == "}" { n -= 1 } }
+            return true
+        }
+        return n
+    }
+
     /// `line` without a trailing `# comment`.
     private static func withoutComment(_ line: String) -> String {
         var end = line.endIndex
@@ -849,15 +975,22 @@ enum CodexMCPToml {
     /// The key of a `[table]` header line, split at its dots; nil for any
     /// other line, including `[[array]]` headers.
     private static func headerParts(_ line: String) -> [String]? {
+        header(line).flatMap { $0.array ? nil : $0.parts }
+    }
+
+    /// The key of a `[table]` or `[[array]]` header line, split at its
+    /// dots. Both end the table before them.
+    private static func header(_ line: String) -> (parts: [String], array: Bool)? {
         let t = withoutComment(line).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard t.hasPrefix("["), !t.hasPrefix("[[") else { return nil }
-        let inner = String(t.dropFirst())
+        guard t.hasPrefix("[") else { return nil }
+        let array = t.hasPrefix("[[")
+        let inner = String(t.dropFirst(array ? 2 : 1))
         var end: String.Index?
         scan(inner) { i, quoted in
             if !quoted && inner[i] == "]" { end = i; return false }
             return true
         }
-        return end.map { splitKey(String(inner[..<$0])) }
+        return end.map { (splitKey(String(inner[..<$0])), array) }
     }
 
     /// `a.b."c.d".'e.f'` → ["a", "b", "c.d", "e.f"]
@@ -914,11 +1047,40 @@ enum CodexMCPToml {
     private static func strings(in s: String) -> [String] {
         let re = try! NSRegularExpression(pattern: #""((?:[^"\\]|\\.)*)"|'([^']*)'"#)
         return re.matches(in: s, range: NSRange(s.startIndex..., in: s)).compactMap { m in
-            if let r = Range(m.range(at: 1), in: s) {
-                return String(s[r]).replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\")
-            }
+            if let r = Range(m.range(at: 1), in: s) { return unescape(String(s[r])) }
             return Range(m.range(at: 2), in: s).map { String(s[$0]) }
         }
+    }
+
+    /// The text of a basic string's body: `\t`, `\n`, `é`… decoded.
+    private static func unescape(_ body: String) -> String {
+        guard body.contains("\\") else { return body }
+        var out = "", it = Array(body.unicodeScalars), i = 0
+        while i < it.count {
+            let c = it[i]; i += 1
+            guard c == "\\", i < it.count else { out.unicodeScalars.append(c); continue }
+            let e = it[i]; i += 1
+            switch e {
+            case "t": out += "\t"
+            case "n": out += "\n"
+            case "r": out += "\r"
+            case "b": out += "\u{8}"
+            case "f": out += "\u{C}"
+            case "e": out += "\u{1B}"
+            case "\"": out += "\""
+            case "\\": out += "\\"
+            case "u", "U", "x":
+                let n = e == "U" ? 8 : e == "u" ? 4 : 2
+                if i + n <= it.count, let v = UInt32(String(String.UnicodeScalarView(it[i..<i + n])), radix: 16),
+                   let scalar = Unicode.Scalar(v) {
+                    out.unicodeScalars.append(scalar); i += n
+                } else {
+                    out.unicodeScalars.append(c); out.unicodeScalars.append(e)
+                }
+            default: out.unicodeScalars.append(c); out.unicodeScalars.append(e)
+            }
+        }
+        return out
     }
 
     private static func inlineTable(_ s: String) -> [String: String] {
@@ -933,7 +1095,7 @@ enum CodexMCPToml {
         var dropped: [String] = []
         var skipping = false
         for line in text.components(separatedBy: "\n") {
-            if let parts = headerParts(line) {
+            if let parts = header(line)?.parts {
                 let starts = parts.count >= 2 && parts[0] == "mcp_servers" && parts[1] == name
                 // The blank lines after the table go with it; the one before
                 // stays, and so do comments right above the next table.
@@ -968,29 +1130,54 @@ enum CodexMCPToml {
         return lines.joined(separator: "\n")
     }
 
-    /// Lines of the server's main table that the form doesn't own.
-    static func otherLines(of name: String, in text: String) -> [String] {
-        let owned: Set<String> = ["command", "args", "env", "url", "http_headers", "enabled"]
+    /// `text` with the server `name` rewritten as `s`, in place. Only what
+    /// the form owns is replaced; other settings, comments and sub-tables
+    /// (`[mcp_servers.x.env_http_headers]`, `[mcp_servers.x.tools.search]`)
+    /// stay where they were, renamed along with the server.
+    static func replacing(_ name: String, with s: MCPServer, in text: String) -> String {
+        let ownedKeys: Set<String> = ["command", "args", "env", "url", "http_headers", "enabled"]
+        // The form writes these inline, so a sub-table form of them goes.
+        let ownedTables: Set<String> = ["env", "http_headers"]
         let lines = text.components(separatedBy: "\n")
-        guard let header = lines.firstIndex(where: { isHeader($0, of: name, sub: false) }) else { return [] }
+        guard lines.contains(where: { isHeader($0, of: name, sub: false) }) else {
+            return replacingTable(name, with: table(for: s), in: text)
+        }
         var out: [String] = []
-        var i = header + 1
-        // Inside a multi-line array: whether its lines are kept.
-        var keepingArray: Bool?
-        while i < lines.count, keepingArray != nil || !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("[") {
-            let line = lines[i]
-            i += 1
-            if let keep = keepingArray {
-                if keep { out.append(line) }
-                if line.contains("]") { keepingArray = nil }
+        // Where the line sits: in the server's main table, in one of its
+        // sub-tables (dropped or not), or elsewhere.
+        var inMain = false, inSub = false, dropTable = false
+        // Brackets a multi-line value leaves open, and whether it is dropped.
+        var open = 0, dropValue = false
+        for line in lines {
+            if open > 0 {
+                open += depth(line)
+                if !dropValue { out.append(line) }
                 continue
             }
-            guard let k = keyOf(line) else { continue }
-            let keep = !owned.contains(k)
-            if keep { out.append(line) }
-            if line.contains("[") && !line.contains("]") { keepingArray = keep }
+            if let (parts, array) = header(line) {
+                let mine = parts.count >= 2 && parts[0] == "mcp_servers" && parts[1] == name
+                inMain = mine && !array && parts.count == 2
+                inSub = mine && !inMain
+                dropTable = inSub && !array && parts.count == 3 && ownedTables.contains(parts[2])
+                if inMain {
+                    out += table(for: s).components(separatedBy: "\n").dropLast()
+                } else if dropTable {
+                    continue
+                } else if inSub && s.name != name {
+                    let path = (["mcp_servers", s.name] + parts[2...]).map(key).joined(separator: ".")
+                    out.append(array ? "[[\(path)]]" : "[\(path)]")
+                } else {
+                    out.append(line)
+                }
+                continue
+            }
+            let drop = (inSub && dropTable) || (inMain && keyOf(line).map(ownedKeys.contains) == true)
+            if keyOf(line) != nil {
+                open = max(0, depth(line)); dropValue = drop
+            }
+            if !drop { out.append(line) }
         }
-        return out
+        return out.joined(separator: "\n")
     }
 
     /// `text` with the server's tables replaced by `table`, in the same place.
@@ -1026,8 +1213,24 @@ enum CodexMCPToml {
         return unquote(String(t[..<eq]).trimmingCharacters(in: .whitespaces))
     }
 
+    /// A TOML basic string. Control characters are escaped, since TOML
+    /// forbids them raw (a newline would end the line mid-string).
     static func quote(_ s: String) -> String {
-        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        var out = "\""
+        for c in s.unicodeScalars {
+            switch c {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\t": out += "\\t"
+            case "\r": out += "\\r"
+            case "\u{8}": out += "\\b"
+            case "\u{C}": out += "\\f"
+            case _ where c.value < 0x20 || c.value == 0x7F: out += String(format: "\\u%04X", c.value)
+            default: out.unicodeScalars.append(c)
+            }
+        }
+        return out + "\""
     }
 
     private static func key(_ s: String) -> String {
@@ -1087,7 +1290,13 @@ extension JSONC {
         let empty = next.map { chars[$0] == "}" } ?? true
         let pad = String(repeating: indent, count: level)
         if empty, let close = next {
-            return String(chars[...open]) + newline + pad + quoteKey(member) + ": " + body + newline
+            // An object holding only comments keeps them, ahead of the member.
+            var head = String(chars[...open])
+            let inner = chars[(open + 1)..<close]
+            if inner.contains(where: { !$0.isWhitespace }) {
+                head += String(inner[..<((inner.lastIndex { !$0.isWhitespace } ?? open) + 1)])
+            }
+            return head + newline + pad + quoteKey(member) + ": " + body + newline
                 + String(repeating: indent, count: level - 1) + String(chars[close...])
         }
         return String(chars[...open]) + newline + pad + quoteKey(member) + ": " + body + "," + String(chars[(open + 1)...])
@@ -1110,20 +1319,29 @@ extension JSONC {
         let chars = Array(text)
         guard let open = objectStart(path, in: chars), let span = memberSpan(member, in: open, chars) else { return nil }
         var start = span.key, end = span.valueEnd
+        // The last member takes the comma before it instead. That comma
+        // goes alone, so a `// comment` after it stays.
+        var lone: Int?
         if let comma = span.comma {
             end = comma + 1
         } else if let previous = span.previousComma {
-            start = previous
+            lone = previous
         }
         // Whole lines go when the member had them to itself.
         // isNewline throughout: "\r\n" is one Character, and not "\n".
         let lineStart = (chars[..<start].lastIndex(where: \.isNewline) ?? -1) + 1
-        if start != span.previousComma, chars[lineStart..<start].allSatisfy({ $0 == " " || $0 == "\t" }) {
+        var wholeLine = false
+        if chars[lineStart..<start].allSatisfy({ $0 == " " || $0 == "\t" }) {
             var j = end
             while j < chars.count, chars[j] == " " || chars[j] == "\t" { j += 1 }
-            if j < chars.count, chars[j].isNewline { start = lineStart; end = j + 1 }
+            if j < chars.count, chars[j].isNewline { start = lineStart; end = j + 1; wholeLine = true }
         }
-        return String(chars[..<start]) + String(chars[end...])
+        // On a shared line with nothing but spaces before it: `, "b": 2` goes together.
+        if let previous = lone, !wholeLine, chars[(previous + 1)..<start].allSatisfy(\.isWhitespace) {
+            start = previous; lone = nil
+        }
+        guard let lone else { return String(chars[..<start]) + String(chars[end...]) }
+        return String(chars[..<lone]) + String(chars[(lone + 1)..<start]) + String(chars[end...])
     }
 
     /// The value of `member` in the object at `path`, parsed.

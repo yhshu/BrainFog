@@ -30,6 +30,20 @@ struct EmptyStateFrame: ViewModifier {
     }
 }
 
+/// Reads the sidebar's visibility in a view of its own, so toggling it
+/// doesn't re-evaluate the whole lens in the first frame of the slide.
+private struct SidebarToggle: View {
+    @Binding var columns: NavigationSplitViewVisibility
+
+    var body: some View {
+        let hidden = columns == .detailOnly
+        Button(hidden ? "Show Sidebar" : "Hide Sidebar", systemImage: "sidebar.left") {
+            withAnimation { columns = hidden ? .all : .detailOnly }
+        }
+        .help(hidden ? "Show Sidebar" : "Hide Sidebar")
+    }
+}
+
 /// What each agent loads for the selected place, one section per agent.
 struct ContextLensView: View {
     @Environment(AppModel.self) private var model
@@ -42,6 +56,7 @@ struct ContextLensView: View {
     @State private var visibleTop: CGFloat = 0
     @State private var scroll = ScrollPosition()
     @State private var query = ""
+    @Binding var columns: NavigationSplitViewVisibility
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -115,8 +130,14 @@ struct ContextLensView: View {
         .navigationTitle(model.selection?.title ?? "BrainFog")
         .toolbar(removing: .title)
         .toolbar {
-            // Toolbar toggles, so they take the same size and capsule as
-            // the sidebar's toolbar buttons.
+            // The sidebar's own toggle lives in the sidebar column, which
+            // starts too narrow to hold it as the sidebar opens; for that
+            // frame the toolbar overflows (a ">>" and a collapsed search
+            // field). Here it always has room. Out of the switcher's shared
+            // capsule, which a spacer alone doesn't split.
+            ToolbarItem(placement: .navigation) { SidebarToggle(columns: $columns) }
+                .sharedBackgroundVisibility(.hidden)
+            // Toolbar toggles, so they take the toolbar's own size and capsule.
             ToolbarItemGroup(placement: .navigation) {
                 ForEach(LensMode.allCases, id: \.self) { m in
                     Toggle(isOn: Binding(get: { mode == m }, set: { if $0 { mode = m } })) {
@@ -146,9 +167,9 @@ struct ContextLensView: View {
         guard !query.isEmpty else { return true }
         if Search.matches(query, ctx.agent.displayName) { return true }
         return switch mode {
-        case .context: ctx.entries.contains { Search.matches(query, $0) }
-        case .skills: ctx.skills.contains { Search.matches(query, $0) }
-        case .mcp: (model.servers[ctx.agent] ?? []).contains { Search.matches(query, $0) }
+        case .context: model.shownEntries(ctx).contains { Search.matches(query, $0) }
+        case .skills: model.shownSkills(ctx).contains { Search.matches(query, $0) }
+        case .mcp: model.shownServers(ctx.agent).contains { Search.matches(query, $0) }
         case .timeline: true
         }
     }
@@ -156,11 +177,11 @@ struct ContextLensView: View {
     private func pinnedSummary(_ ctx: ResolvedContext) -> String {
         switch mode {
         case .context:
-            "\(ctx.entries.count) \(ctx.entries.count == 1 ? "file" : "files") · about \(ctx.launchTokens.tokenLabel) tokens at launch"
+            "\(model.shownEntries(ctx).count) \(model.shownEntries(ctx).count == 1 ? "file" : "files") · about \(ctx.launchTokens.tokenLabel) tokens at launch"
         case .skills:
-            "\(ctx.skills.count) \(ctx.skills.count == 1 ? "skill" : "skills")"
+            "\(model.shownSkills(ctx).count) \(model.shownSkills(ctx).count == 1 ? "skill" : "skills")"
         case .mcp:
-            "\((model.servers[ctx.agent] ?? []).count) MCP \((model.servers[ctx.agent] ?? []).count == 1 ? "server" : "servers")"
+            "\(model.shownServers(ctx.agent).count) MCP \(model.shownServers(ctx.agent).count == 1 ? "server" : "servers")"
         case .timeline: ""
         }
     }
@@ -168,11 +189,17 @@ struct ContextLensView: View {
     private var description: String {
         switch (mode, model.selection == .global) {
         case (.context, true): "Instructions and memory every agent reads in every project."
-        case (.context, false): "What each agent reads when started in this folder, in the order it enters the context."
+        case (.context, false): model.showGlobalInProjects
+            ? "What each agent reads when started in this folder, in the order it enters the context."
+            : "What each agent reads from this folder, in the order it enters the context. Global files are on the Global page."
         case (.skills, true): "Skills available to each agent in every project."
-        case (.skills, false): "Skills each agent can use when started in this folder, including global ones."
+        case (.skills, false): model.showGlobalInProjects
+            ? "Skills each agent can use when started in this folder, including global ones."
+            : "Skills this folder adds for each agent. Global ones are on the Global page."
         case (.mcp, true): "MCP servers each agent can use in every project."
-        case (.mcp, false): "MCP servers each agent can use in this folder. Right-click one to copy it to another agent."
+        case (.mcp, false): model.showGlobalInProjects
+            ? "MCP servers each agent can use in this folder. Right-click one to copy it to another agent."
+            : "MCP servers this folder adds for each agent; global ones are on the Global page. Right-click one to copy it to another agent."
         case (.timeline, true): "Every change to the global files the agents read, newest first, including what agents write to their own memory while BrainFog is open."
         case (.timeline, false): "Every change to the files the agents read in this folder, newest first, including what agents write to their own memory while BrainFog is open."
         }
@@ -227,10 +254,18 @@ struct AgentSection: View {
     /// A filter that matches the agent's own name keeps everything.
     private var filtering: Bool { !query.isEmpty && !Search.matches(query, context.agent.displayName) }
     private var entries: [ContextEntry] {
-        filtering ? context.entries.filter { Search.matches(query, $0) } : context.entries
+        let all = model.shownEntries(context)
+        return filtering ? all.filter { Search.matches(query, $0) } : all
     }
     private var skills: [Skill] {
-        filtering ? context.skills.filter { Search.matches(query, $0) } : context.skills
+        let all = model.shownSkills(context)
+        return filtering ? all.filter { Search.matches(query, $0) } : all
+    }
+    /// Global files read at launch that this page leaves out.
+    private var hiddenGlobal: [ContextEntry] {
+        guard model.hidesGlobal, !filtering else { return [] }
+        let shown = Set(model.shownEntries(context).map(\.url))
+        return context.entries.filter { $0.timing.isLoadedAtLaunch && !shown.contains($0.url) }
     }
     private var launched: [ContextEntry] { entries.filter { $0.timing.isLoadedAtLaunch } }
     private var onDemand: [ContextEntry] {
@@ -253,7 +288,7 @@ struct AgentSection: View {
     @AppStorage("collapsedAgents") private var collapsedAgents = ""
 
     private var servers: [MCPServer] {
-        let all = model.servers[context.agent] ?? []
+        let all = model.shownServers(context.agent)
         return filtering ? all.filter { Search.matches(query, $0) } : all
     }
 
@@ -469,12 +504,17 @@ struct AgentSection: View {
     /// Three groups, each answering one question: what is read at the start
     /// of every session, what is read only when relevant, and what is ignored.
     @ViewBuilder private var contextGroups: some View {
+        let tokens = model.hidesGlobal ? launched.reduce(0) { $0 + $1.tokens } : context.launchTokens
         GroupHeader(title: "Every session",
                     detail: launched.isEmpty ? "no files"
-                        : "\(launched.count) \(launched.count == 1 ? "file" : "files") · about \(context.launchTokens.tokenLabel) tokens")
+                        : "\(launched.count) \(launched.count == 1 ? "file" : "files") · about \(tokens.tokenLabel) tokens")
             .help("Read in full at the start of every session. \(tokenHelp)")
         if launched.count > 1 { TokenBar(entries: launched, tint: context.agent.tint) }
         ForEach(launched) { EntryCard(entry: $0) }
+        if !hiddenGlobal.isEmpty {
+            let n = hiddenGlobal.count
+            NoteText(text: "Also reads \(n) global \(n == 1 ? "file" : "files"), about \(hiddenGlobal.reduce(0) { $0 + $1.tokens }.tokenLabel) tokens, listed on the Global page. View → Show Global Items in Projects lists \(n == 1 ? "it" : "them") here too.")
+        }
         ForEach(notes(.launch)) { NoteText(text: $0.message) }
 
         if !onDemand.isEmpty || !notes(.onDemand).isEmpty {
@@ -738,15 +778,23 @@ extension AppModel {
     }
 }
 
-/// Moves a file or folder to the Trash, closing it in the editor first.
+/// Moves a file or folder to the Trash, then closes it in the editor.
+/// Unsaved edits to it are asked about first.
 @MainActor func moveToTrash(_ url: URL, model: AppModel) {
-    if let open = model.selectedEntry?.url.standardizedFileURL.path,
-       open == url.standardizedFileURL.path || open.hasPrefix(url.standardizedFileURL.path + "/") {
-        model.selectedEntry = nil
+    let path = url.standardizedFileURL.path
+    let isOpen = model.selectedEntry.map {
+        let open = $0.url.standardizedFileURL.path
+        return open == path || open.hasPrefix(path + "/")
+    } ?? false
+    let trash = {
+        NSWorkspace.shared.recycle([url]) { _, error in
+            Task { @MainActor in
+                if error == nil, isOpen { model.selectedEntry = nil }
+                model.resolve()
+            }
+        }
     }
-    NSWorkspace.shared.recycle([url]) { _, _ in
-        Task { @MainActor in model.resolve() }
-    }
+    if isOpen { model.whenEditsAreSafe(trash) } else { trash() }
 }
 
 struct GroupHeader: View {

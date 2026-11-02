@@ -18,7 +18,12 @@ import Foundation
     /// Starts watching the folders of `urls`; does nothing when they are
     /// the same as last time.
     func watch(_ urls: Set<URL>) {
-        let files = Set(urls.filter(\.isFileURL).map { $0.resolvingSymlinksInPath().path })
+        // Files directly in the home folder (~/.claude.json above all, which
+        // Claude Code rewrites constantly) would put all of home under watch
+        // and re-resolve on every write; coming back to the app picks them up.
+        let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
+        let files = Set(urls.filter(\.isFileURL).map { $0.resolvingSymlinksInPath().path }
+            .filter { ($0 as NSString).deletingLastPathComponent != home })
         // A folder inside another watched folder is already covered.
         let dirs = Set(files.map { ($0 as NSString).deletingLastPathComponent }).sorted()
         let folders = dirs.filter { d in !dirs.contains { d != $0 && d.hasPrefix($0 + "/") } }

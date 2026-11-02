@@ -9,17 +9,19 @@ struct ContentView: View {
     /// How much the window grew to make room for the editor, given back on close.
     @State private var grownBy: CGFloat = 0
     @AppStorage("editorWidth") private var editorWidth = 480.0
+    @State private var columns = NavigationSplitViewVisibility.all
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                .toolbar(removing: .sidebarToggle)
         } detail: {
             // The editor is a plain column inside the detail rather than an
             // inspector: an inspector re-sections the toolbar as it opens,
             // which flashes the top bar.
             HStack(spacing: 0) {
-                ContextLensView()
+                ContextLensView(columns: $columns)
                     .frame(minWidth: 560)
                 if let entry = model.selectedEntry {
                     ColumnResizer(width: $editorWidth, range: 360...760)
@@ -60,6 +62,8 @@ struct ContentView: View {
             let guard_ = CloseGuard(model: model, inner: window.delegate)
             window.delegate = guard_
             closeGuard = guard_
+            // The toolbar is filled in after the window appears.
+            DispatchQueue.main.async { fitSearchField(in: window) }
         }
         .onChange(of: model.selectedEntry != nil) { _, open in
             resizeForEditor(open: open)
@@ -105,6 +109,25 @@ struct ContentView: View {
         CATransaction.setDisableActions(true)
         window.setFrame(frame, display: false, animate: false)
         CATransaction.commit()
+    }
+}
+
+/// The toolbar's search field takes AppKit's default width, which bears no
+/// relation to anything around it; make it as wide as the buttons to its
+/// left so the two capsules read as a pair.
+@MainActor private func fitSearchField(in window: NSWindow) {
+    guard let items = window.toolbar?.items,
+          let search = items.first(where: { $0 is NSSearchToolbarItem }) as? NSSearchToolbarItem else { return }
+    let frames = items.compactMap { item in item.view.map { $0.convert($0.bounds, to: nil) } }
+    guard let minX = frames.map(\.minX).min(), let maxX = frames.map(\.maxX).max() else { return }
+    let width = maxX - minX
+    search.preferredWidthForSearchField = width
+    // The item caches its maximum width when it is first laid out, so
+    // the preferred width alone only shows after the next toolbar rebuild.
+    if let box = search.searchField.superview {
+        for c in box.constraints where c.firstItem === box && c.firstAttribute == .width && c.relation == .lessThanOrEqual {
+            c.constant = width
+        }
     }
 }
 
@@ -179,7 +202,10 @@ struct Sidebar: View {
 
     var body: some View {
         // Leaving the page closes the editor, so ask first about unsaved edits.
+        // ⌘-clicking the selected row would clear it and leave a blank page,
+        // so there is always a page selected.
         List(selection: Binding(get: { model.selection }, set: { place in
+            guard let place else { return }
             model.whenEditsAreSafe { model.selection = place }
         })) {
             Label("Global", systemImage: "globe").tag(Place.global)
@@ -193,11 +219,19 @@ struct Sidebar: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem {
+        // At the foot of the sidebar, as in Finder and Mail, rather than in
+        // the toolbar: a toolbar item in the sidebar column has to morph
+        // away with the column, which stalls every frame of hiding it.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack {
                 Button("Add Project", systemImage: "plus") { pickFolder() }
+                    .labelStyle(.titleAndIcon)
+                    .buttonStyle(.borderless)
                     .help("Add a project folder")
+                Spacer()
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
     }
 

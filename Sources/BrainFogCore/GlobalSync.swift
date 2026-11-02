@@ -89,9 +89,26 @@ public struct GlobalSyncReport: Sendable {
             let existing = FileSupport.read(file)
             if target.agent == .claudeCode {
                 let line = Self.importLine(source, env: env)
-                if existing.map({ Self.lines(of: $0).contains(line) }) != true {
-                    edits.append(FileEdit.append(line + "\n", to: file))
+                // An import of an earlier source (any agent's global file) is
+                // replaced, so switching sources doesn't import both.
+                let stale = Set((targets.compactMap(\.file) + [self.source].compactMap { $0 })
+                    .map { Self.importLine($0, env: env) }).subtracting([line])
+                guard let existing else { edits.append(FileEdit.append(line + "\n", to: file)); continue }
+                var parts = existing.components(separatedBy: "\n")
+                func bare(_ s: String) -> String { s.hasSuffix("\r") ? String(s.dropLast()) : s }
+                let has = parts.contains { bare($0) == line }
+                let old = parts.indices.filter { stale.contains(bare(parts[$0])) }
+                if old.isEmpty {
+                    if !has { edits.append(FileEdit.append(line + "\n", to: file)) }
+                    continue
                 }
+                var drop = Set(old)
+                if !has {
+                    parts[old[0]] = line + (parts[old[0]].hasSuffix("\r") ? "\r" : "")
+                    drop.remove(old[0])
+                }
+                parts = parts.indices.filter { !drop.contains($0) }.map { parts[$0] }
+                edits.append(FileEdit(url: file, before: existing, after: parts.joined(separator: "\n")))
                 continue
             }
             let copy = Self.header(source, env: env) + content

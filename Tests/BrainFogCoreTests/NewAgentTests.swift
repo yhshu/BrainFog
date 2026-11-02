@@ -12,8 +12,7 @@ import Testing
         try s.write("code/GEMINI.md", "above the git root")
         let ctx = GeminiResolver().resolve(workingDirectory: s.project, environment: s.env())
         #expect(s.names(ctx) == ["~/.gemini/GEMINI.md", "~/code/app/GEMINI.md", "~/code/app/docs/style.md"])
-        let pkg = try #require(ctx.entries.first { $0.url.path.hasSuffix("pkg/GEMINI.md") })
-        #expect(pkg.timing == .onDemand("when a tool reads or edits files in pkg/"))
+        #expect(!ctx.entries.contains { $0.url.path.hasSuffix("pkg/GEMINI.md") })
         #expect(!ctx.entries.contains { $0.url.path.hasSuffix("code/GEMINI.md") })
     }
 
@@ -50,8 +49,7 @@ import Testing
                                  "~/code/app/CLAUDE.md", "~/code/app/.github/instructions/all.instructions.md"])
         let ts = try #require(ctx.entries.first { $0.url.lastPathComponent == "ts.instructions.md" })
         #expect(ts.timing == .onDemand("when working on files matching **/*.ts"))
-        let nested = try #require(ctx.entries.first { $0.url.path.hasSuffix("pkg/AGENTS.md") })
-        #expect(nested.timing == .onDemand("when Copilot works on files in pkg/"))
+        #expect(!ctx.entries.contains { $0.url.path.hasSuffix("pkg/AGENTS.md") })
     }
 }
 
@@ -70,8 +68,7 @@ import Testing
         #expect(s.names(ctx) == ["~/.config/devin/AGENTS.md", "~/code/app/AGENTS.md", "~/code/app/CLAUDE.md",
                                  "~/code/app/.devin/rules/always.md", "~/code/app/.windsurf/rules/old.md",
                                  "~/code/app/.cursor/rules/style.mdc"])
-        let api = try #require(ctx.entries.first { $0.url.path.hasSuffix("api/AGENTS.md") })
-        #expect(api.timing == .onDemand("when Devin works on files in api/"))
+        #expect(!ctx.entries.contains { $0.url.path.hasSuffix("api/AGENTS.md") })
     }
 
     @Test func readConfigFromTurnsSourcesOff() throws {

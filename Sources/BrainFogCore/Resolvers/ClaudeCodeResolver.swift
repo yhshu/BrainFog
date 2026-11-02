@@ -1,12 +1,15 @@
 import Foundation
 
-/// Models Claude Code's default `claude-md-or-agents-md` loading.
-/// See docs/DESIGN.md §3 for the rules and their sources.
+/// Models Claude Code's loading under each Project instructions setting
+/// (https://code.claude.com/docs/en/memory). The CLI, the IDE extensions and
+/// the desktop app's Code tab read the same files. See docs/DESIGN.md §3.
 public struct ClaudeCodeResolver: ContextResolver {
     public let agent = AgentID.claudeCode
     public static let memoryLineLimit = 200
     public static let memoryByteLimit = 25 * 1024
     public static let maxImportHops = 4
+    /// A CLAUDE.md larger than this is skipped whole.
+    public static let maxFileBytes = 4 * 1024 * 1024
 
     public init() {}
 
@@ -22,13 +25,18 @@ public struct ClaudeCodeResolver: ContextResolver {
         let cwd = workingDirectory.standardizedFileURL
         let claudeHome = env.home.appendingPathComponent(".claude")
         let projectRoot = FileSupport.gitRoot(of: cwd)
-        let settings = ClaudeSettings(home: env.home, projectRoot: projectRoot ?? cwd)
+        let settings = ClaudeSettings(home: env.home, projectRoot: projectRoot ?? cwd, managed: env.claudeManagedDirectory)
+        let mode = settings.instructionFiles
         var list = EntryList(agent: agent)
 
         func add(_ url: URL, _ scope: Scope, _ timing: LoadTiming = .launch, note: String? = nil) {
             var timing = timing
             if scope != .managed, settings.isExcluded(url) {
                 timing = .skipped("excluded by claudeMdExcludes")
+            } else if mode == .managedOnly, scope != .managed, timing.isLoadedAtLaunch {
+                timing = .skipped("Project instructions is set to managed-only")
+            } else if FileSupport.size(url) > Self.maxFileBytes {
+                timing = .skipped("over 4 MiB, so Claude Code loads none of it")
             }
             guard let text = list.add(url, scope: scope, timing: timing, note: note) else { return }
             if case .skipped = timing { return }
@@ -39,13 +47,19 @@ public struct ClaudeCodeResolver: ContextResolver {
         add(env.claudeManagedDirectory.appendingPathComponent("CLAUDE.md"), .managed)
         let userFile = claudeHome.appendingPathComponent("CLAUDE.md")
         add(userFile, .user)
-        addRules(in: claudeHome.appendingPathComponent("rules"), base: cwd, into: &list)
+        addRules(in: claudeHome.appendingPathComponent("rules"), base: cwd, mode: mode, into: &list)
 
-        // 2. Ancestors, root first. CLAUDE.md files win over AGENTS.md.
+        // 2. Ancestors, root first. By default CLAUDE.md files win over AGENTS.md.
         let ancestors = FileSupport.ancestors(of: cwd)
         let agentsNames = ["AGENTS.md", ".claude/AGENTS.md"]
         let claudeFiles = Self.claudeFiles(above: cwd, home: env.home)
-        let readsAgents = claudeFiles.isEmpty
+        let readsAgents = mode == .claudeOrAgents && claudeFiles.isEmpty
+        let skipAgents: String? = switch mode {
+        case .claudeOrAgents: "a CLAUDE.md exists, so AGENTS.md is not read by default"
+        case .claudeAndAgents: nil
+        case .claudeOnly: "Project instructions is set to claude-md"
+        case .managedOnly: "Project instructions is set to managed-only"
+        }
 
         for dir in ancestors {
             let above = dir.path != cwd.path
@@ -65,41 +79,25 @@ public struct ClaudeCodeResolver: ContextResolver {
                     dir.appendingPathComponent($0).resolvingSymlinksInPath().path
                 })
                 for name in agentsNames where !linked.contains(dir.appendingPathComponent(name).resolvingSymlinksInPath().path) {
-                    list.add(dir.appendingPathComponent(name), scope: .project,
-                             timing: .skipped("a CLAUDE.md exists, so AGENTS.md is not read by default"))
+                    if let skipAgents {
+                        list.add(dir.appendingPathComponent(name), scope: .project, timing: .skipped(skipAgents))
+                    } else {
+                        add(dir.appendingPathComponent(name), .project, note: where_)
+                    }
                 }
             }
             if dir.path != env.home.path {
-                addRules(in: dir.appendingPathComponent(".claude/rules"), base: dir, into: &list)
+                addRules(in: dir.appendingPathComponent(".claude/rules"), base: dir, mode: mode, into: &list)
             }
         }
 
-        if !readsAgents, claudeFiles.allSatisfy({ $0.lastPathComponent == "CLAUDE.local.md" }),
+        if mode == .claudeOrAgents, !readsAgents, claudeFiles.allSatisfy({ $0.lastPathComponent == "CLAUDE.local.md" }),
            ancestors.contains(where: { FileSupport.isFile($0.appendingPathComponent("AGENTS.md")) }) {
             list.diagnostics.append(.init(.warning,
                 "Only a CLAUDE.local.md exists, so Claude Code skips AGENTS.md. Add @AGENTS.md to CLAUDE.local.md, or set Project instructions to claude-md-and-agents-md."))
         }
 
-        // 3. Subdirectory files load on demand.
-        for url in FileSupport.walk(cwd, maxDepth: 5, include: {
-            ["CLAUDE.md", "CLAUDE.local.md"].contains($0.lastPathComponent)
-        }) where url.deletingLastPathComponent().path != cwd.path {
-            let rel = url.deletingLastPathComponent().path.dropFirst(cwd.path.count + 1)
-            add(url, url.lastPathComponent == "CLAUDE.local.md" ? .local : .directory,
-                .onDemand("when Claude reads or edits files in \(rel)/"))
-        }
-        // A subfolder's AGENTS.md stands in when it has no CLAUDE file of its own.
-        for url in FileSupport.walk(cwd, maxDepth: 5, include: { $0.lastPathComponent == "AGENTS.md" })
-        where url.deletingLastPathComponent().path != cwd.path && url.deletingLastPathComponent().lastPathComponent != ".claude" {
-            let dir = url.deletingLastPathComponent()
-            guard !["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"].contains(where: {
-                FileSupport.isFile(dir.appendingPathComponent($0))
-            }) else { continue }
-            let rel = dir.path.dropFirst(cwd.path.count + 1)
-            add(url, .directory, .onDemand("when Claude reads files in \(rel)/, which has no CLAUDE.md"))
-        }
-
-        // 4. Auto memory.
+        // 3. Auto memory.
         addAutoMemory(cwd: cwd, projectRoot: projectRoot, claudeHome: claudeHome,
                       settings: settings, env: env, into: &list)
 
@@ -116,13 +114,15 @@ public struct ClaudeCodeResolver: ContextResolver {
         }.filter { FileSupport.isFile($0) && $0.path != userFile.path }
     }
 
-    private func addRules(in dir: URL, base: URL, into list: inout EntryList) {
+    private func addRules(in dir: URL, base: URL, mode: ClaudeSettings.InstructionFiles, into list: inout EntryList) {
         guard FileSupport.isDirectory(dir) else { return }
         for url in FileSupport.walk(dir, skipHidden: false) where url.pathExtension == "md" {
             let text = FileSupport.read(url) ?? ""
             let paths = Frontmatter.split(text).yaml.map { Frontmatter.list("paths", in: $0) } ?? []
-            let timing: LoadTiming = paths.isEmpty
-                ? .launch : .onDemand("when Claude reads or edits files matching \(paths.joined(separator: ", "))")
+            // managed-only keeps path-scoped rules, which still load on demand.
+            let timing: LoadTiming = !paths.isEmpty
+                ? .onDemand("when Claude reads or edits files matching \(paths.joined(separator: ", "))")
+                : mode == .managedOnly ? .skipped("Project instructions is set to managed-only") : .launch
             list.add(url, scope: .rule, timing: timing)
         }
     }
@@ -210,21 +210,48 @@ public struct ClaudeCodeResolver: ContextResolver {
 
 /// The few Claude Code settings that change what loads.
 struct ClaudeSettings {
+    /// Project instructions: which of CLAUDE.md and AGENTS.md load.
+    enum InstructionFiles: String {
+        case claudeOrAgents = "claude-md-or-agents-md"
+        case claudeAndAgents = "claude-md-and-agents-md"
+        case claudeOnly = "claude-md"
+        case managedOnly = "managed-only"
+    }
+
     var autoMemoryEnabled = true
     var autoMemoryDirectory: String?
     var excludes: [String] = []
+    var instructionFiles = InstructionFiles.claudeOrAgents
 
-    init(home: URL, projectRoot: URL) {
-        let files = [
-            home.appendingPathComponent(".claude/settings.json"),
-            projectRoot.appendingPathComponent(".claude/settings.json"),
-            projectRoot.appendingPathComponent(".claude/settings.local.json"),
-        ]
+    init(home: URL, projectRoot: URL, managed: URL? = nil) {
+        let user = home.appendingPathComponent(".claude/settings.json")
+        // managed-settings.json, then managed-settings.d/*.json in name order.
+        var managedFiles: [URL] = []
+        if let managed {
+            managedFiles.append(managed.appendingPathComponent("managed-settings.json"))
+            let dropIns = managed.appendingPathComponent("managed-settings.d")
+            managedFiles += ((try? FileManager.default.contentsOfDirectory(atPath: dropIns.path)) ?? [])
+                .filter { !$0.hasPrefix(".") && $0.hasSuffix(".json") }.sorted()
+                .map { dropIns.appendingPathComponent($0) }
+        }
+        let files = [user,
+                     projectRoot.appendingPathComponent(".claude/settings.json"),
+                     projectRoot.appendingPathComponent(".claude/settings.local.json")] + managedFiles
         for file in files {
             guard let text = FileSupport.read(file), let json = JSONC.object(from: text) else { continue }
             if let v = json["autoMemoryEnabled"] as? Bool { autoMemoryEnabled = v }
             if let v = json["autoMemoryDirectory"] as? String { autoMemoryDirectory = v }
             if let v = json["claudeMdExcludes"] as? [String] { excludes += v }
+            // Read only from user and managed settings. Claude Code 2.1.285
+            // and later accept both plugin IDs; the newer one wins here.
+            guard file == user || managedFiles.contains(file),
+                  let plugins = json["pluginConfigs"] as? [String: Any] else { continue }
+            for id in ["agents-md@builtin", "cc-plugin-agents-md@builtin"] {
+                let options = (plugins[id] as? [String: Any])?["options"] as? [String: Any]
+                if let v = (options?["instructionFiles"] as? String).flatMap(InstructionFiles.init(rawValue:)) {
+                    instructionFiles = v
+                }
+            }
         }
     }
 

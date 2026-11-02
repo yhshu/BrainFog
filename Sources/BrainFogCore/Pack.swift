@@ -63,8 +63,10 @@ public struct AgentPack: Codable, Sendable, Equatable {
             .first { $0.scope == .autoMemory && $0.url.lastPathComponent == "MEMORY.md" }?
             .url.deletingLastPathComponent().resolvingSymlinksInPath()
 
-        func place(_ url: URL) -> (Base, String)? {
-            let path = url.resolvingSymlinksInPath().path
+        /// `resolving: false` keeps a link's own path (only its folder is resolved).
+        func place(_ url: URL, resolving: Bool = true) -> (Base, String)? {
+            let path = resolving ? url.resolvingSymlinksInPath().path
+                : url.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(url.lastPathComponent).path
             if let root {
                 if let rel = relative(path, to: root) { return (.project, rel) }
                 if let memory, let rel = relative(path, to: memory) { return (.claudeMemory, rel) }
@@ -74,8 +76,8 @@ public struct AgentPack: Codable, Sendable, Equatable {
         }
 
         var files: [String: File] = [:]
-        func add(_ url: URL, agent: AgentID) {
-            guard url.isFileURL, let (base, path) = place(url), let raw = FileSupport.read(url) else { return }
+        func add(_ url: URL, agent: AgentID, as placed: (Base, String)? = nil) {
+            guard url.isFileURL, let (base, path) = placed ?? place(url), let raw = FileSupport.read(url) else { return }
             let key = base.rawValue + ":" + path
             if files[key] != nil {
                 if !files[key]!.agents.contains(agent) { files[key]!.agents.append(agent) }
@@ -92,10 +94,14 @@ public struct AgentPack: Codable, Sendable, Equatable {
                 add(entry.url, agent: ctx.agent)
             }
             // A skill is its whole folder: scripts and references too.
-            for skill in ctx.skills where skill.scope != .bundled && place(skill.folder) != nil {
+            // A symlinked skill folder is packed under its own name, not its target's.
+            for skill in ctx.skills where skill.scope != .bundled {
+                guard let (base, root) = place(skill.folder, resolving: false) else { continue }
+                let prefixes = [skill.folder.standardizedFileURL.path, skill.folder.resolvingSymlinksInPath().path].map { $0 + "/" }
                 for url in FileSupport.walk(skill.folder, maxDepth: 4, limit: 200, skipHidden: true,
                                             include: { FileSupport.size($0) <= History.maxBytes }) {
-                    add(url, agent: ctx.agent)
+                    let rel = prefixes.first(where: url.path.hasPrefix).map { url.path.dropFirst($0.count) }
+                    add(url, agent: ctx.agent, as: rel.map { (base, root + "/" + $0) })
                 }
             }
         }
@@ -115,7 +121,10 @@ public struct AgentPack: Codable, Sendable, Equatable {
             // Tokens also turn up on the command line and in URL queries.
             var names: [String] = []
             out.args = redactArgs(out.args, names: &names)
-            if let url = out.url { out.url = redactQuery(url, names: &names) }
+            if let url = out.url {
+                let query = redactQuery(url, names: &names)
+                out.url = redactPassword(query, names: &names) ?? query
+            }
             for name in names {
                 stripped.append("\(name) in MCP server “\(server.name)” (\(server.agent.displayName)), now ${\(name)}")
             }
@@ -236,7 +245,7 @@ public struct AgentPack: Codable, Sendable, Equatable {
     private static func namesSecret(_ name: String) -> Bool {
         let words = name.lowercased().split { !$0.isLetter && !$0.isNumber }
         return words.contains { ["token", "secret", "key", "apikey", "password", "passwd", "auth",
-                                 "authorization", "credential", "credentials", "pat"].contains(String($0)) }
+                                 "authorization", "credential", "credentials", "pat", "cookie"].contains(String($0)) }
     }
 
     /// A value that is a literal credential, not a reference to a variable.
@@ -252,19 +261,48 @@ public struct AgentPack: Codable, Sendable, Equatable {
         return words.isEmpty ? fallback : words.joined(separator: "_")
     }
 
-    /// Replaces credentials in `--flag value`, `--flag=value` and bare
-    /// token arguments with references to variables, named in `names`.
+    /// `Authorization: Bearer xyz` (as passed to `--header`) with the value
+    /// replaced by a reference to a variable, when the header names a
+    /// credential; nil otherwise.
+    static func redactHeader(_ s: String, names: inout [String]) -> String? {
+        guard let head = s.range(of: #"^[A-Za-z][A-Za-z0-9_-]*:[ \t]*"#, options: .regularExpression) else { return nil }
+        let header = String(s[..<s[head].firstIndex(of: ":")!]), value = String(s[head.upperBound...])
+        guard namesSecret(header), !value.isEmpty, !value.hasPrefix("$"), !Secrets.onlyReferences(value) else { return nil }
+        let name = variable(header, fallback: "TOKEN")
+        names.append(name)
+        return String(s[..<head.upperBound]) + "${\(name)}"
+    }
+
+    /// A URL with the password of its `user:password@` replaced by a
+    /// reference to a variable; nil when it has none.
+    static func redactPassword(_ url: String, names: inout [String]) -> String? {
+        guard let password = Secrets.urlPassword(in: url) else { return nil }
+        names.append("URL_PASSWORD")
+        return url.replacingCharacters(in: password, with: "${URL_PASSWORD}")
+    }
+
+    /// Replaces credentials in `--flag value`, `--flag=value`, bare token
+    /// arguments, `Name: value` headers and URL passwords with references
+    /// to variables, named in `names`.
     static func redactArgs(_ args: [String], names: inout [String]) -> [String] {
         var out = args
         for i in out.indices {
             let arg = out[i]
             if arg.hasPrefix("-"), let eq = arg.firstIndex(of: "=") {
                 let flag = String(arg[..<eq]), value = String(arg[arg.index(after: eq)...])
+                if let v = redactHeader(value, names: &names) ?? redactPassword(value, names: &names) {
+                    out[i] = flag + "=" + v
+                    continue
+                }
                 guard isSecretValue(value, named: namesSecret(flag)) else { continue }
                 let name = variable(flag, fallback: "TOKEN")
                 out[i] = flag + "=${\(name)}"
                 names.append(name)
             } else if !arg.hasPrefix("-") {
+                if let v = redactHeader(arg, names: &names) ?? redactPassword(arg, names: &names) {
+                    out[i] = v
+                    continue
+                }
                 let flag = i > 0 && args[i - 1].hasPrefix("-") && !args[i - 1].contains("=") ? args[i - 1] : ""
                 guard isSecretValue(arg, named: namesSecret(flag)) else { continue }
                 let name = variable(flag, fallback: "TOKEN")

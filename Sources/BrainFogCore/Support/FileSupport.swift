@@ -82,8 +82,18 @@ enum FileSupport {
                 }
             }
         }
-        visit(dir, depth: 0)
-        return result
+        // A symlinked root lists nothing itself, so its target is walked and
+        // the files are named under the link, where the caller looks.
+        guard (try? fm.destinationOfSymbolicLink(atPath: dir.path)) != nil else {
+            visit(dir, depth: 0)
+            return result
+        }
+        let real = dir.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let link = dir.standardizedFileURL.path + "/"
+        visit(URL(fileURLWithPath: real, isDirectory: true), depth: 0)
+        return result.map { url in
+            url.path.hasPrefix(real) ? URL(fileURLWithPath: link + url.path.dropFirst(real.count)) : url
+        }
     }
 }
 
@@ -246,7 +256,10 @@ enum Glob {
         let literal = parts.prefix { !hasWildcard($0) }
         let root = URL(fileURLWithPath: "/" + literal.joined(separator: "/")).standardizedFileURL
         let rest = parts.dropFirst(literal.count).joined(separator: "/")
-        return FileSupport.walk(root, skipHidden: false).filter { url in
+        // Without `**` a match is exactly as deep as the pattern, so a
+        // `*.md` in a parent folder doesn't walk everything below it.
+        let depth = rest.contains("**") ? 6 : parts.count - literal.count - 1
+        return FileSupport.walk(root, maxDepth: depth, skipHidden: false).filter { url in
             matches(rest, String(url.path.dropFirst(root.path.count + 1)))
         }
     }

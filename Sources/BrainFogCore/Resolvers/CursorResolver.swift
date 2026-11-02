@@ -33,23 +33,6 @@ public struct CursorResolver: ContextResolver {
                 ".cursorrules is deprecated; Cursor recommends moving it to .cursor/rules.", url: legacy))
         }
 
-        // 4. Nested rules and AGENTS.md apply when working in their folder.
-        for url in FileSupport.walk(cwd, maxDepth: 6, skipHidden: false, include: {
-            $0.lastPathComponent == "AGENTS.md" || $0.path.contains("/.cursor/rules/")
-        }) {
-            let parts = url.pathComponents.dropFirst(cwd.pathComponents.count)
-            if parts.count > 1, parts.last == "AGENTS.md", !parts.contains(where: { $0.hasPrefix(".") }) {
-                let folder = parts.dropLast().joined(separator: "/")
-                list.add(url, scope: .directory, timing: .onDemand("when working in \(folder)/"))
-                continue
-            }
-            // <folder>/.cursor/rules/…, with no other hidden folder on the way.
-            guard let i = parts.firstIndex(of: ".cursor"), i > parts.startIndex,
-                  parts.index(after: i) < parts.endIndex, parts[parts.index(after: i)] == "rules",
-                  !parts[..<i].contains(where: { $0.hasPrefix(".") }) else { continue }
-            addRule(url, nested: parts[..<i].joined(separator: "/"), into: &list)
-        }
-
         return list.finish(workingDirectory: cwd, projectRoot: projectRoot)
     }
 

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Models Devin Local, the agent in Devin Desktop (formerly Windsurf) and
-/// Devin CLI. Windsurf's Cascade can no longer start conversations, so its
+/// Devin CLI, which read the same files. Windsurf's Cascade can no longer start conversations, so its
 /// rules engine is not modelled. Closed source; this follows
 /// docs.devin.ai. See docs/DESIGN.md §3.
 public struct DevinResolver: ContextResolver {
@@ -31,31 +31,18 @@ public struct DevinResolver: ContextResolver {
             addRule(url, scope: .user, nested: nil, list: &list)
         }
 
-        // 2. Workspace root down to cwd.
+        // 2. Workspace root down to cwd. Only the root's instruction files
+        // load at session start; deeper ones wait until Devin touches files
+        // there, while .devin rules load at every level.
+        // https://docs.devin.ai/cli/extensibility/rules
         let levels = FileSupport.ancestors(of: cwd).filter { FileSupport.isWithin($0, root) }
         for dir in levels {
+            let atRoot = dir.path == root.path
             let note = dir.path == cwd.path ? nil : "parent directory"
-            addAlwaysOn(in: dir, timing: .launch, note: note, sources: sources, list: &list)
+            let folder = String(dir.path.dropFirst(root.path.count + 1))
+            addAlwaysOn(in: dir, timing: atRoot ? .launch : .onDemand("when Devin works on files in \(folder)/"),
+                        note: note, sources: sources, list: &list)
             addRuleFolders(in: dir, nested: nil, sources: sources, list: &list)
-        }
-
-        // 3. Subdirectories load when Devin touches files in them.
-        let names = Set(Self.alwaysOnNames)
-        for url in FileSupport.walk(cwd, maxDepth: 6, skipHidden: false, include: {
-            names.contains($0.lastPathComponent) || $0.path.contains("/.devin/rules/") || $0.path.contains("/.windsurf/rules/")
-        }) {
-            let parts = url.pathComponents.dropFirst(cwd.pathComponents.count)
-            guard parts.count > 1 else { continue }
-            if let i = parts.firstIndex(where: { $0 == ".devin" || $0 == ".windsurf" }) {
-                guard i > parts.startIndex, !parts[..<i].contains(where: { $0.hasPrefix(".") }),
-                      parts.index(after: i) < parts.endIndex, parts[parts.index(after: i)] == "rules" else { continue }
-                if parts[i] == ".windsurf" && !sources.windsurf { continue }
-                addRule(url, scope: .rule, nested: parts[..<i].joined(separator: "/"), list: &list)
-            } else if !parts.dropLast().contains(where: { $0.hasPrefix(".") }) {
-                let folder = parts.dropLast().joined(separator: "/")
-                guard sources.allows(url.lastPathComponent) else { continue }
-                list.add(url, scope: .directory, timing: .onDemand("when Devin works on files in \(folder)/"))
-            }
         }
 
         if !sources.disabled.isEmpty {
@@ -143,8 +130,9 @@ public struct DevinResolver: ContextResolver {
 
 /// `read_config_from` in `~/.config/devin/config.json` or
 /// `.devin/config.json`: which other tools' files Devin reads. All on by default.
+/// (`opencode` only brings in MCP servers.)
 struct DevinSources {
-    var claude = true, cursor = true, windsurf = true, agentsStandard = true
+    var claude = true, cursor = true, windsurf = true, openCode = true, agentsStandard = true
 
     init(home: URL, root: URL) {
         for file in [home.appendingPathComponent(".config/devin/config.json"),
@@ -154,12 +142,13 @@ struct DevinSources {
             if let v = from["claude"] as? Bool { claude = v }
             if let v = from["cursor"] as? Bool { cursor = v }
             if let v = from["windsurf"] as? Bool { windsurf = v }
+            if let v = from["opencode"] as? Bool { openCode = v }
             if let v = from["agents_standard"] as? Bool { agentsStandard = v }
         }
     }
 
     var disabled: [String] {
-        [("Claude", claude), ("Cursor", cursor), ("Windsurf", windsurf), ("AGENTS.md", agentsStandard)]
+        [("Claude", claude), ("Cursor", cursor), ("Windsurf", windsurf), ("OpenCode", openCode), ("AGENTS.md", agentsStandard)]
             .filter { !$0.1 }.map(\.0)
     }
 

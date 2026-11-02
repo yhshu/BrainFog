@@ -66,11 +66,20 @@ public struct NewFileOption: Identifiable, Sendable, Hashable {
                 rule,
             ]
         case .geminiCLI:
-            return [project.map {
-                .init(title: "GEMINI.md", detail: "Read by Gemini CLI in this project",
-                      url: $0.appendingPathComponent("GEMINI.md"), needsName: false)
-            } ?? .init(title: "GEMINI.md", detail: "Instructions for every project; the agent saves global notes here too",
-                       url: GeminiResolver.home(env).appendingPathComponent(".gemini/GEMINI.md"), needsName: false)]
+            let geminiHome = GeminiResolver.home(env).appendingPathComponent(".gemini")
+            guard let project else {
+                return [.init(title: "GEMINI.md", detail: "Instructions for every project; the agent saves global notes here too",
+                              url: geminiHome.appendingPathComponent("GEMINI.md"), needsName: false)]
+            }
+            // Antigravity drops a rule without a trigger; Gemini CLI ignores the folder.
+            var rule = NewFileOption(title: "Rule File…", detail: "Applied to every Antigravity session in this project",
+                                     url: project.appendingPathComponent(".agents/rules"), needsName: true)
+            rule.template = "---\ntrigger: always_on\n---\n\n"
+            return [
+                .init(title: "GEMINI.md", detail: "Read by Gemini CLI and Antigravity in this project",
+                      url: project.appendingPathComponent("GEMINI.md"), needsName: false),
+                rule,
+            ]
         case .copilot:
             guard let project else {
                 return [.init(title: "copilot-instructions.md", detail: "Personal instructions for Copilot CLI",

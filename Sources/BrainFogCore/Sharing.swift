@@ -54,6 +54,12 @@ public struct SharingReport: Sendable {
             case nil:
                 status.detail = exists ? "doesn’t read AGENTS.md" : "no AGENTS.md yet"
             }
+            // Antigravity reads AGENTS.md itself; Gemini CLI still needs the import.
+            if ctx.agent == .geminiCLI, status.reads, entry?.importedBy == nil,
+               entry?.note?.hasSuffix(GeminiResolver.antigravityOnlyAgentsNote) == true {
+                status.reads = false
+                status.detail = "Antigravity reads it, but Gemini CLI doesn’t"
+            }
             if exists, !status.reads {
                 status.fix = fix(for: ctx.agent, project: project, env: env)
             }

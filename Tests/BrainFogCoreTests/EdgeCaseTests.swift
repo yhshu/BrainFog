@@ -102,12 +102,16 @@ import Testing
         #expect(s.names(ctx).contains("~/code/AGENTS.md"))
     }
 
-    @Test func nestedClaudeFileFoundInLargeRepo() throws {
+    /// Files in subfolders load only once the agent works there, so the
+    /// project isn't searched for them: no agent lists one.
+    @Test func noAgentListsFilesInSubfolders() throws {
         let s = try Sandbox()
-        for i in 0..<2100 { try s.write(String(format: "a/f%04d.txt", i), "", in: s.project) }
-        try s.write("z/CLAUDE.md", "deep", in: s.project)
-        let ctx = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
-        #expect(ctx.entries.contains { $0.url.path.hasSuffix("z/CLAUDE.md") })
+        for name in ["CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursor/rules/x.mdc", ".devin/rules/x.md"] {
+            try s.write("pkg/" + name, "nested", in: s.project)
+        }
+        for ctx in Resolvers.resolveAll(workingDirectory: s.project, environment: s.env()) {
+            #expect(!ctx.entries.contains { $0.url.path.contains("/pkg/") }, "\(ctx.agent)")
+        }
     }
 
     @Test func codexConfigHashInsideString() throws {

@@ -235,7 +235,8 @@ public struct ChangeSet: Identifiable, Sendable, Hashable {
                 if let before = edit.before {
                     try? before.write(to: edit.url.resolvingSymlinksInPath(), atomically: true, encoding: .utf8)
                 } else {
-                    try? fm.removeItem(at: edit.url)
+                    // What the write created; a dangling link it wrote through stays.
+                    try? fm.removeItem(at: FileWriter.destination(of: edit.url))
                 }
             }
             throw error
@@ -250,9 +251,22 @@ public enum FileWriter {
             history.record(url, text: old, origin: .beforeChange)
         }
         // Write through a symlink (`ln -s AGENTS.md CLAUDE.md`) so the link stays.
-        let target = url.resolvingSymlinksInPath()
+        let target = destination(of: url)
         try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         try text.write(to: target, atomically: true, encoding: .utf8)
         history.record(url, text: text, origin: .brainFog)
+    }
+
+    /// The file a write to `url` lands in: the end of its symlinks, even a
+    /// dangling one, which `resolvingSymlinksInPath` leaves as the link and
+    /// an atomic write would replace with a plain file.
+    static func destination(of url: URL) -> URL {
+        var url = url.resolvingSymlinksInPath()
+        // Bounded, so a link loop ends.
+        for _ in 0..<16 {
+            guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) else { break }
+            url = URL(fileURLWithPath: dest, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+        }
+        return url
     }
 }

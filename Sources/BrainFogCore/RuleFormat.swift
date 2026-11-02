@@ -113,8 +113,12 @@ extension Frontmatter {
     static func replacing(_ key: String, with lines: [String]?, in text: String) -> String {
         // A leading BOM stays where it is, ahead of the block.
         if text.hasPrefix("\u{FEFF}") { return "\u{FEFF}" + replacing(key, with: lines, in: String(text.dropFirst())) }
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
-        let parts = split(normalized)
+        // Edited with "\n"; a Windows file gets its "\r\n" back.
+        if text.contains("\r\n") {
+            return replacing(key, with: lines, in: text.replacingOccurrences(of: "\r\n", with: "\n"))
+                .replacingOccurrences(of: "\n", with: "\r\n")
+        }
+        let parts = split(text)
         guard let yaml = parts.yaml else {
             guard let lines else { return text }
             return "---\n" + lines.joined(separator: "\n") + "\n---\n" + (text.hasPrefix("\n") ? text : "\n" + text)
@@ -142,7 +146,10 @@ extension Frontmatter {
     static func quoteIfNeeded(_ value: String) -> String {
         let special = ": #{}[],&*!|>'\"%@`"
         let needs = value.contains { special.contains($0) } || value.hasPrefix(" ") || value.hasPrefix("-")
-        guard needs else { return value }
+        // Bare, these would read back as a bool, null, number or date.
+        let typed = ["true", "false", "yes", "no", "on", "off", "y", "n", "null", "~"].contains(value.lowercased())
+            || value.range(of: #"^[+.]?[0-9]|^\.(inf|nan)$"#, options: [.regularExpression, .caseInsensitive]) != nil
+        guard needs || typed else { return value }
         return quoted(value)
     }
 }

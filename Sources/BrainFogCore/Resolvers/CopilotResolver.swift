@@ -59,24 +59,16 @@ public struct CopilotResolver: ContextResolver {
             }
         }
 
-        // 4. Below cwd: read when Copilot works on files there.
-        let names = Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md", "copilot-instructions.md"])
-        for url in FileSupport.walk(cwd, maxDepth: 6, skipHidden: false, include: { names.contains($0.lastPathComponent) }) {
-            var dir = url.deletingLastPathComponent()
-            if url.lastPathComponent == "copilot-instructions.md" {
-                guard dir.lastPathComponent == ".github" else { continue }
-                dir = dir.deletingLastPathComponent()
-            }
-            guard dir.path != cwd.path else { continue }
-            let folder = String(dir.path.dropFirst(cwd.path.count + 1))
-            guard !folder.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
-            list.add(url, scope: .directory, timing: .onDemand("when Copilot works on files in \(folder)/"))
-        }
-
         list.diagnostics.append(.init(.info,
-            "Copilot Memory and organization instructions are stored on GitHub, not in files, so they are not shown here. VS Code’s Local agent also reads ~/.claude/CLAUDE.md and .claude/rules.",
+            "Copilot Memory and organization instructions are stored on GitHub, not in files, so they are not shown here. VS Code’s Local agent also reads ~/.claude/CLAUDE.md, CLAUDE.local.md and .claude/rules when chat.useClaudeMdFile is on.",
             topic: .onDemand))
         return list.finish(workingDirectory: cwd, projectRoot: projectRoot)
+    }
+
+    /// A boolean from VS Code's user settings.json, or nil when unset.
+    static func vsCodeSetting(_ key: String, env: ResolverEnvironment) -> Bool? {
+        let file = env.home.appendingPathComponent("Library/Application Support/Code/User/settings.json")
+        return FileSupport.read(file).flatMap(JSONC.object(from:))?[key] as? Bool
     }
 
     private func addInstructions(_ url: URL, scope: Scope, into list: inout EntryList) {
