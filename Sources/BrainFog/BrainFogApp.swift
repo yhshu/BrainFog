@@ -138,7 +138,7 @@ struct AgentIcon: View {
             cache[agent] = .some(nil)
             return nil
         }
-        let dirs = ["/Applications", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path]
+        let dirs = ["/Applications", ResolverEnvironment.defaultHome.appendingPathComponent("Applications").path]
         let path = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)?.path
             ?? dirs.map { $0 + "/" + name }.first { FileManager.default.fileExists(atPath: $0) }
         let icon = path.map { NSWorkspace.shared.icon(forFile: $0) }
@@ -188,7 +188,7 @@ enum InstalledArtwork {
     /// The first of `files` inside the newest installed version of a VS Code
     /// (or Cursor, or VS Code Insiders) extension.
     private static func newest(extension id: String, files: [String]) -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let home = ResolverEnvironment.defaultHome
         let roots = [".vscode/extensions", ".vscode-insiders/extensions", ".cursor/extensions"].map { home.appendingPathComponent($0) }
         for root in roots {
             let folders = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])

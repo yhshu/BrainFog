@@ -28,10 +28,12 @@ public final class CodexMemoryStore {
             .filter { $0.hasPrefix("memories_") && $0.hasSuffix(".sqlite") }
             .max { Self.version($0) < Self.version($1) }
         guard let newest else { return nil }
+        // By plain path, not a `file:` URI, so `#` or `?` in a folder name is literal.
         let path = codexHome.appendingPathComponent(newest).path
-        guard sqlite3_open_v2("file:\(path)?mode=ro", &db,
-                              SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            // deinit still runs for a failed init, so don't close twice.
             sqlite3_close(db)
+            db = nil
             return nil
         }
     }

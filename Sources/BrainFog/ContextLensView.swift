@@ -22,6 +22,14 @@ enum LensMode: String, CaseIterable {
     }
 }
 
+/// Centers an empty state in the room left under the page header, since a
+/// scroll view would otherwise shrink it to its content.
+struct EmptyStateFrame: ViewModifier {
+    func body(content: Content) -> some View {
+        content.frame(maxWidth: .infinity, minHeight: 360)
+    }
+}
+
 /// What each agent loads for the selected place, one section per agent.
 struct ContextLensView: View {
     @Environment(AppModel.self) private var model
@@ -63,6 +71,7 @@ struct ContextLensView: View {
                             }
                             if !query.isEmpty, !model.contexts.contains(where: shows) {
                                 ContentUnavailableView.search(text: query)
+                                    .modifier(EmptyStateFrame())
                             }
                         }
                     }
@@ -116,18 +125,18 @@ struct ContextLensView: View {
                     .help(m.title)
                 }
             }
-            // Pushes the search field to the trailing edge, where the
-            // Human Interface Guidelines put it.
-            ToolbarSpacer(.flexible)
+            // Right after the switcher, so it stays put when the editor
+            // opens and widens the window.
+            ToolbarSpacer(.fixed, placement: .navigation)
+            DefaultToolbarItem(kind: .search, placement: .navigation)
         }
     }
 
     private var searchPrompt: String {
         switch mode {
-        case .context: "Filter files"
-        case .skills: "Filter skills"
-        case .mcp: "Filter servers"
-        case .timeline: "Filter changes"
+        case .context, .timeline: "Search files"
+        case .skills: "Search skills"
+        case .mcp: "Search servers"
         }
     }
 
@@ -437,8 +446,9 @@ struct AgentSection: View {
     private func create(_ make: () throws -> URL) {
         do {
             let url = try make()
-            model.selectedEntry = ContextEntry(agent: context.agent, url: url.standardizedFileURL,
-                                               scope: isInProject(url) ? .project : .user, timing: .launch)
+            let entry = ContextEntry(agent: context.agent, url: url.standardizedFileURL,
+                                     scope: isInProject(url) ? .project : .user, timing: .launch)
+            model.whenEditsAreSafe { model.selectedEntry = entry }
             model.resolve()
         } catch {
             copyError = error.localizedDescription
@@ -459,7 +469,7 @@ struct AgentSection: View {
                     detail: launched.isEmpty ? "no files"
                         : "\(launched.count) \(launched.count == 1 ? "file" : "files") · about \(context.launchTokens.tokenLabel) tokens")
             .help("Read in full at the start of every session. \(tokenHelp)")
-        TokenBar(entries: launched, tint: context.agent.tint)
+        if launched.count > 1 { TokenBar(entries: launched, tint: context.agent.tint) }
         ForEach(launched) { EntryCard(entry: $0) }
         ForEach(notes(.launch)) { NoteText(text: $0.message) }
 
@@ -943,10 +953,14 @@ struct ServerRow: View {
         .modifier(RowChrome(tint: server.agent.tint, isSelected: false))
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 2) {
-                Toggle("On", isOn: Binding(get: { server.enabled }, set: { setEnabled($0) }))
+                if server.needsApproval {
+                    Text("Asks first").font(.caption2).foregroundStyle(.secondary)
+                        .help("Claude Code asks you to approve this project server when a session starts. Turn it on to approve it here.")
+                }
+                Toggle("On", isOn: Binding(get: { isOn }, set: { setEnabled($0) }))
                     .toggleStyle(.switch).labelsHidden().controlSize(.mini)
                     .disabled(!server.canSwitch)
-                    .help(server.canSwitch ? (server.enabled ? "On: turn off for new sessions" : "Off: turn on for new sessions")
+                    .help(server.canSwitch ? (isOn ? "On: turn off for new sessions" : "Off: turn on for new sessions")
                                            : (MCPEdit.Failure.noSwitch(server).errorDescription ?? ""))
                     .padding(.trailing, 6)
                 Button("Edit", systemImage: "pencil") { editing = true }
@@ -962,7 +976,7 @@ struct ServerRow: View {
         .opacity(server.enabled ? 1 : 0.55)
         .help("Click to open its config file. Right-click to copy it to another agent.")
         .contextMenu {
-            Button(server.enabled ? "Turn Off" : "Turn On") { setEnabled(!server.enabled) }
+            Button(isOn ? "Turn Off" : server.needsApproval ? "Approve…" : "Turn On…") { setEnabled(!isOn) }
                 .disabled(!server.canSwitch)
             Button("Edit…") { editing = true }.disabled(!server.editable)
             Button("Remove…") { remove() }.disabled(!server.editable)
@@ -995,13 +1009,20 @@ struct ServerRow: View {
         }
     }
 
+    /// A project server Claude Code hasn't approved yet doesn't run, so its
+    /// switch shows off until the user approves it.
+    private var isOn: Bool { server.enabled && !server.needsApproval }
+
     private var notEditable: String {
         MCPEdit.Failure.notEditable(server).errorDescription ?? ""
     }
 
+    /// Turning a server off happens at once. Turning one on lets it run a
+    /// command, so that change is shown for review first.
     private func setEnabled(_ on: Bool) {
         do {
-            try model.applyNow(MCPEdit.setEnabled(server, on))
+            let change = try MCPEdit.setEnabled(server, on)
+            if on { model.pendingChange = change } else { try model.applyNow(change) }
         } catch {
             self.error = error.localizedDescription
         }

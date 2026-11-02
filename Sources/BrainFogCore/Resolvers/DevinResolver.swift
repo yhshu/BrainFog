@@ -111,9 +111,7 @@ public struct DevinResolver: ContextResolver {
     private func addRule(_ url: URL, scope: Scope, nested: String?, list: inout EntryList) {
         guard url.pathExtension == "md" else { return }
         let yaml = Frontmatter.split(FileSupport.read(url) ?? "").yaml ?? ""
-        let globs = Frontmatter.list("globs", in: yaml)
-            .flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
-            .filter { !$0.isEmpty }
+        let globs = Frontmatter.list("globs", in: yaml).flatMap(Frontmatter.commaList)
         var timing: LoadTiming = switch Frontmatter.scalar("trigger", in: yaml) ?? "manual" {
         case "always_on": .launch
         case "glob": .onDemand("when files matching \(globs.isEmpty ? "its globs" : globs.joined(separator: ", ")) are touched")

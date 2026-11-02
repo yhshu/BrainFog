@@ -60,7 +60,11 @@ public struct ClaudeCodeResolver: ContextResolver {
                     add(dir.appendingPathComponent(".claude/CLAUDE.md"), .project, note: where_)
                 }
                 add(dir.appendingPathComponent("CLAUDE.local.md"), .local, note: where_)
-                for name in agentsNames {
+                // A CLAUDE.md linked to AGENTS.md is already listed as itself.
+                let linked = Set(["CLAUDE.md", ".claude/CLAUDE.md"].map {
+                    dir.appendingPathComponent($0).resolvingSymlinksInPath().path
+                })
+                for name in agentsNames where !linked.contains(dir.appendingPathComponent(name).resolvingSymlinksInPath().path) {
                     list.add(dir.appendingPathComponent(name), scope: .project,
                              timing: .skipped("a CLAUDE.md exists, so AGENTS.md is not read by default"))
                 }

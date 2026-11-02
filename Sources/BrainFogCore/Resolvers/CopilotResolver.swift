@@ -81,8 +81,7 @@ public struct CopilotResolver: ContextResolver {
 
     private func addInstructions(_ url: URL, scope: Scope, into list: inout EntryList) {
         let yaml = Frontmatter.split(FileSupport.read(url) ?? "").yaml ?? ""
-        let applyTo = (Frontmatter.scalar("applyTo", in: yaml) ?? "")
-            .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let applyTo = Frontmatter.commaList(Frontmatter.scalar("applyTo", in: yaml) ?? "")
         let timing: LoadTiming
         if applyTo.contains("**") || applyTo.contains("**/*") {
             timing = .launch

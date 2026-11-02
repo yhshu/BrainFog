@@ -30,9 +30,8 @@ public final class History: @unchecked Sendable {
         public var previous: Version
     }
 
-    public static let shared = History(directory: FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("BrainFog/History"))
+    public static let shared = History(directory: ResolverEnvironment.defaultHome
+        .appendingPathComponent("Library/Application Support/BrainFog/History"))
 
     /// Versions kept per file; the oldest go first.
     public static let maxVersions = 200
@@ -212,13 +211,34 @@ public struct ChangeSet: Identifiable, Sendable, Hashable {
     }
 
     /// Writes every edit, refusing all of them if any target changed since
-    /// the plan was made. Old and new texts both go into `history`.
+    /// the plan was made. Old and new texts both go into `history`. If a
+    /// write fails anyway, the edits already written are put back.
     public func apply(history: History = .shared) throws {
-        for edit in edits where FileSupport.read(edit.url) != edit.before {
-            throw ApplyError.changedOnDisk(edit.url)
-        }
+        let fm = FileManager.default
         for edit in edits {
-            try FileWriter.write(edit.after, to: edit.url, history: history)
+            if FileSupport.read(edit.url) != edit.before { throw ApplyError.changedOnDisk(edit.url) }
+            // The nearest folder that exists must be a folder, or the write can't happen.
+            var dir = edit.url.deletingLastPathComponent()
+            while !fm.fileExists(atPath: dir.path) && dir.path != "/" { dir = dir.deletingLastPathComponent() }
+            if !FileSupport.isDirectory(dir) || FileSupport.isDirectory(edit.url) {
+                throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: edit.url.path])
+            }
+        }
+        var written: [FileEdit] = []
+        do {
+            for edit in edits {
+                try FileWriter.write(edit.after, to: edit.url, history: history)
+                written.append(edit)
+            }
+        } catch {
+            for edit in written.reversed() {
+                if let before = edit.before {
+                    try? before.write(to: edit.url, atomically: true, encoding: .utf8)
+                } else {
+                    try? fm.removeItem(at: edit.url)
+                }
+            }
+            throw error
         }
     }
 }
@@ -229,8 +249,10 @@ public enum FileWriter {
         if let old = FileSupport.read(url) {
             history.record(url, text: old, origin: .beforeChange)
         }
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        // Write through a symlink (`ln -s AGENTS.md CLAUDE.md`) so the link stays.
+        let target = url.resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: target, atomically: true, encoding: .utf8)
         history.record(url, text: text, origin: .brainFog)
     }
 }

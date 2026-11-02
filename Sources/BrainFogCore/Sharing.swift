@@ -35,13 +35,17 @@ public struct SharingReport: Sendable {
         let file = project.appendingPathComponent("AGENTS.md").standardizedFileURL
         let exists = FileSupport.isFile(file)
         var statuses: [Status] = []
+        // A CLAUDE.md that links to AGENTS.md reads it under its own name.
+        let real = file.resolvingSymlinksInPath()
         for ctx in contexts {
             let entry = ctx.entries.first { $0.url.standardizedFileURL == file }
+                ?? ctx.entries.first { $0.url.resolvingSymlinksInPath() == real }
             var status = Status(agent: ctx.agent, reads: false, detail: "")
             switch entry?.timing {
             case .launch?:
                 status.reads = true
-                status.detail = entry?.importedBy.map { "through an import in \($0.lastPathComponent)" } ?? "every session"
+                status.detail = entry?.importedBy.map { "through an import in \($0.lastPathComponent)" }
+                    ?? (entry?.url.standardizedFileURL == file ? "every session" : "through \(entry?.url.lastPathComponent ?? ""), a link to it")
             case .onDemand(let why)?:
                 status.reads = true
                 status.detail = why

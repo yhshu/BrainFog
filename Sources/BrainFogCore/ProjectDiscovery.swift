@@ -13,28 +13,38 @@ public enum ProjectDiscovery {
         }
     }
 
-    public static func discover(environment env: ResolverEnvironment = .init()) -> [Project] {
+    /// Folders whose projects are throwaway and never listed.
+    public static let transientFolders = ["/private/tmp", "/tmp", "/private/var/folders", "/var/folders"]
+
+    public static func discover(environment env: ResolverEnvironment = .init(),
+                                transient: [String] = transientFolders) -> [Project] {
         var found: [String: Set<AgentID>] = [:]
+        // Keyed by the standardized path, so `/x/app` and `/x/app/` are one project.
+        func add(_ path: String, _ agent: AgentID) {
+            found[URL(fileURLWithPath: path).standardizedFileURL.path, default: []].insert(agent)
+        }
 
         // Claude Code: keys of `projects` in ~/.claude.json.
         if let text = FileSupport.read(env.home.appendingPathComponent(".claude.json")),
            let json = JSONC.object(from: text), let projects = json["projects"] as? [String: Any] {
-            for path in projects.keys { found[path, default: []].insert(.claudeCode) }
+            for path in projects.keys { add(path, .claudeCode) }
         }
 
         // Codex: `[projects."<path>"]` tables in config.toml.
-        if let text = FileSupport.read(env.home.appendingPathComponent(".codex/config.toml")) {
+        let codexHome = env.variables["CODEX_HOME"].map {
+            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
+        } ?? env.home.appendingPathComponent(".codex")
+        if let text = FileSupport.read(codexHome.appendingPathComponent("config.toml")) {
             let re = try! NSRegularExpression(pattern: #"^\[projects\."([^"]+)"\]"#, options: .anchorsMatchLines)
             for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-                if let r = Range(m.range(at: 1), in: text) { found[String(text[r]), default: []].insert(.codex) }
+                if let r = Range(m.range(at: 1), in: text) { add(String(text[r]), .codex) }
             }
         }
 
-        let transient = ["/private/tmp", "/tmp", "/private/var/folders", "/var/folders"]
         return found.compactMap { path, agents in
-            let url = URL(fileURLWithPath: path).standardizedFileURL
+            let url = URL(fileURLWithPath: path)
             guard url.path != env.home.path, FileSupport.isDirectory(url),
-                  !transient.contains(where: { url.path.hasPrefix($0) }),
+                  !transient.contains(where: { FileSupport.isWithin(url, URL(fileURLWithPath: $0)) }),
                   !url.path.contains("/Library/Application Support/Claude/") else { return nil }
             return Project(url: url, knownBy: agents)
         }

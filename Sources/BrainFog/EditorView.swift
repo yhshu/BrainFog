@@ -22,6 +22,11 @@ struct EditorView: View {
     private var isDirty: Bool { text != original }
     private var isGenerated: Bool { entry.agent == .codex && entry.scope == .autoMemory }
     private var format: RuleFormat? { RuleFormat.detect(entry.url) }
+    /// Rechecked whenever the model resolves, which follows any change on disk.
+    private var isDeleted: Bool {
+        _ = model.historyRevision
+        return entry.url.isFileURL && !FileManager.default.fileExists(atPath: entry.url.path)
+    }
 
     /// Every agent that reads this file, and when.
     private var readers: [(AgentID, LoadTiming)] {
@@ -51,6 +56,10 @@ struct EditorView: View {
                 }
                 if let error {
                     Label(error, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red)
+                }
+                if isDeleted {
+                    Label("Deleted outside BrainFog. Save to write it back, or close to let it go.", systemImage: "trash")
+                        .font(.caption).foregroundStyle(.orange)
                 }
                 if !readers.isEmpty { readerChips.padding(.top, 2) }
                 if let restoring {
@@ -95,9 +104,9 @@ struct EditorView: View {
     /// than icons, so nothing has to be guessed.
     private var actions: some View {
         HStack(spacing: 8) {
-            Text(status).font(.caption).foregroundStyle(isDirty ? .orange : .secondary)
-            Text(stats).font(.caption).foregroundStyle(.tertiary).monospacedDigit()
-                .help(tokenHelp)
+            if isDirty {
+                Text(autoSave ? "Saving…" : "Unsaved").font(.caption).foregroundStyle(.orange)
+            }
             Spacer()
             historyMenu
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
@@ -115,11 +124,6 @@ struct EditorView: View {
                 .help("Write the file to disk (⌘S)")
         }
         .controlSize(.small)
-    }
-
-    private var stats: String {
-        let lines = text.isEmpty ? 0 : text.components(separatedBy: "\n").count
-        return "≈\(TokenEstimator.estimate(text).tokenLabel) tokens · \(lines) \(lines == 1 ? "line" : "lines")"
     }
 
     private var readerChips: some View {
@@ -181,11 +185,6 @@ struct EditorView: View {
         case .brainFog: "Saved in BrainFog"
         case .beforeChange: "Before a BrainFog change"
         }
-    }
-
-    private var status: String {
-        if isDirty { return autoSave ? "Saving…" : "Unsaved changes" }
-        return autoSave ? "Auto Save on" : "Saved"
     }
 
     private func modified() -> Date? {

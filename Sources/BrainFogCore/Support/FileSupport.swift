@@ -103,6 +103,8 @@ enum Frontmatter {
     /// Splits a leading `---` YAML block from the body. Returns nil fields
     /// when there is none.
     static func split(_ text: String) -> (yaml: String?, body: String) {
+        // Windows editors may save a UTF-8 BOM ahead of the block.
+        let text = text.hasPrefix("\u{FEFF}") ? String(text.dropFirst()) : text
         guard text.hasPrefix("---\n") || text.hasPrefix("---\r\n") else { return (nil, text) }
         // Windows line endings would leave a \r on every key and on the closing ---.
         let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
@@ -121,8 +123,8 @@ enum Frontmatter {
         guard let i = lines.firstIndex(where: { $0.hasPrefix(key + ":") }) else { return [] }
         let inline = lines[i].dropFirst(key.count + 1).trimmingCharacters(in: .whitespaces)
         if inline.hasPrefix("[") {
-            return inline.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-                .split(separator: ",").map { unquote(String($0)) }.filter { !$0.isEmpty }
+            let inner = inline.dropFirst()
+            return commaList(String(inner.hasSuffix("]") ? inner.dropLast() : inner)).map(unquote).filter { !$0.isEmpty }
         }
         if !inline.isEmpty { return [unquote(inline)] }
         var items: [String] = []
@@ -142,8 +144,55 @@ enum Frontmatter {
         return nil
     }
 
-    private static func unquote(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+    /// Reads a YAML scalar: a matching pair of quotes is removed, with the
+    /// escapes `quoted` writes undone.
+    static func unquote(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        guard t.count >= 2, let q = t.first, q == "\"" || q == "'", t.last == q else { return t }
+        let inner = t.dropFirst().dropLast()
+        if q == "'" { return inner.replacingOccurrences(of: "''", with: "'") }
+        var out = "", escaped = false
+        for c in inner {
+            if escaped {
+                switch c {
+                case "n": out.append("\n")
+                case "t": out.append("\t")
+                default: out.append(c)
+                }
+                escaped = false
+            } else if c == "\\" {
+                escaped = true
+            } else {
+                out.append(c)
+            }
+        }
+        return out
+    }
+
+    /// `value` as a YAML double-quoted string; `unquote` reads it back.
+    static func quoted(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\t", with: "\\t")
+        return "\"" + escaped + "\""
+    }
+
+    /// Splits comma-separated globs, leaving the commas inside `{a,b}` alone.
+    static func commaList(_ s: String) -> [String] {
+        var items: [String] = [], current = "", depth = 0
+        for c in s {
+            switch c {
+            case "{": depth += 1
+            case "}": depth = max(0, depth - 1)
+            case "," where depth == 0:
+                items.append(current)
+                current = ""
+                continue
+            default: break
+            }
+            current.append(c)
+        }
+        items.append(current)
+        return items.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 }
 
@@ -208,7 +257,8 @@ enum JSONC {
     /// can read opencode.jsonc.
     static func object(from text: String) -> [String: Any]? {
         var out = ""
-        var i = text.startIndex
+        // A byte-order mark isn't JSON.
+        var i = text.first == "\u{FEFF}" ? text.index(after: text.startIndex) : text.startIndex
         var inString = false
         while i < text.endIndex {
             let c = text[i]
@@ -220,7 +270,8 @@ enum JSONC {
             } else if c == "\"" {
                 inString = true; out.append(c)
             } else if c == "/" && next == "/" {
-                while i < text.endIndex && text[i] != "\n" { i = text.index(after: i) }
+                // isNewline, since "\r\n" is one Character that isn't "\n".
+                while i < text.endIndex && !text[i].isNewline { i = text.index(after: i) }
                 continue
             } else if c == "/" && next == "*" {
                 i = text.index(i, offsetBy: 2)

@@ -57,7 +57,8 @@ public struct GlobalSyncReport: Sendable {
             guard let file else { return Target(agent: agent, file: nil, state: .unsupported) }
             if file.standardizedFileURL == source { return Target(agent: agent, file: file, state: .source) }
             guard let text = FileSupport.read(file) else { return Target(agent: agent, file: file, state: .missing) }
-            if agent == .claudeCode, let source, text.components(separatedBy: "\n").contains(importLine(source, env: env)) {
+            if let source, links(file, to: source) { return Target(agent: agent, file: file, state: .synced) }
+            if agent == .claudeCode, let source, lines(of: text).contains(importLine(source, env: env)) {
                 return Target(agent: agent, file: file, state: .synced)
             }
             guard marker(in: text) != nil else { return Target(agent: agent, file: file, state: .separate) }
@@ -78,11 +79,11 @@ public struct GlobalSyncReport: Sendable {
         var edits: [FileEdit] = []
         var separate: [String] = []
         for target in targets {
-            guard let file = target.file, file.standardizedFileURL != source else { continue }
+            guard let file = target.file, file.standardizedFileURL != source, !Self.links(file, to: source) else { continue }
             let existing = FileSupport.read(file)
             if target.agent == .claudeCode {
                 let line = Self.importLine(source, env: env)
-                if existing?.components(separatedBy: "\n").contains(line) != true {
+                if existing.map({ Self.lines(of: $0).contains(line) }) != true {
                     edits.append(FileEdit.append(line + "\n", to: file))
                 }
                 continue
@@ -105,12 +106,25 @@ public struct GlobalSyncReport: Sendable {
         return ChangeSet(title: "Use \(source.lastPathComponent) for every agent?", detail: detail, edits: edits)
     }
 
-    /// Drift as health issues, each fixed by syncing again.
+    /// Drift as health issues, each fixed by syncing again, or by restoring
+    /// the source from a copy when it was deleted.
     public func issues(environment env: ResolverEnvironment = .init()) -> [HealthIssue] {
         guard let source else { return [] }
         let drifted = targets.filter { $0.state == .drifted }
         guard !drifted.isEmpty else { return [] }
         let names = drifted.map(\.agent.displayName).joined(separator: ", ")
+        // The source is gone, so syncing can't help; bring it back from a copy.
+        if FileSupport.read(source) == nil {
+            guard let copy = drifted.lazy.compactMap({ t in t.file.flatMap(FileSupport.read).map { (t.agent, Self.body(of: $0)) } }).first
+            else { return [] }
+            return [HealthIssue(
+                severity: .warning, title: "Global instructions source is missing",
+                detail: "\(Self.display(source, env)) no longer exists, but \(names) still \(drifted.count == 1 ? "has a copy" : "have copies") of it. Restoring it from a copy lets syncing keep them in step again.",
+                url: source, agents: drifted.map(\.agent),
+                fix: ChangeSet(title: "Restore \(source.lastPathComponent)?",
+                               detail: "\(Self.display(source, env)) is written again with the text of \(copy.0.displayName)’s copy.",
+                               edits: [FileEdit(url: source, before: nil, after: copy.1)]))]
+        }
         return [HealthIssue(
             severity: .warning, title: "Global instructions out of sync for \(names)",
             detail: "These copies of \(Self.display(source, env)) no longer match it: it changed, or a copy was edited. Syncing writes the source’s text again; edits made to a copy are kept in History.",
@@ -157,6 +171,16 @@ public struct GlobalSyncReport: Sendable {
         var rest = text[close.upperBound...]
         if rest.hasPrefix("\n") { rest = rest.dropFirst() }
         return String(rest)
+    }
+
+    /// Lines of `text`, whatever the line endings.
+    static func lines(of text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    }
+
+    /// True when `file` is a symlink that leads to `source`.
+    static func links(_ file: URL, to source: URL) -> Bool {
+        file.resolvingSymlinksInPath().path == source.resolvingSymlinksInPath().path
     }
 
     static func importLine(_ source: URL, env: ResolverEnvironment) -> String {

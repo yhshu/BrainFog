@@ -109,6 +109,13 @@ public struct AgentPack: Codable, Sendable, Equatable {
                 if out.headers[key] != nil { out.headers[key] = "${\(key)}" }
                 stripped.append("\(key) of MCP server “\(server.name)” (\(server.agent.displayName)), now ${\(key)}")
             }
+            // Tokens also turn up on the command line and in URL queries.
+            var names: [String] = []
+            out.args = redactArgs(out.args, names: &names)
+            if let url = out.url { out.url = redactQuery(url, names: &names) }
+            for name in names {
+                stripped.append("\(name) in MCP server “\(server.name)” (\(server.agent.displayName)), now ${\(name)}")
+            }
             packed.append(out)
         }
 
@@ -144,7 +151,9 @@ public struct AgentPack: Codable, Sendable, Equatable {
                 target = memory.appendingPathComponent(file.path)
             }
             // Never write outside the folder the path is relative to.
-            guard !file.path.split(separator: "/").contains("..") else { continue }
+            // An empty or "." path names the folder itself, which can't be written.
+            let parts = file.path.split(separator: "/").filter { $0 != "." }
+            guard !parts.isEmpty, !parts.contains("..") else { continue }
             let existing = FileSupport.read(target)
             if existing == file.text { continue }
             edits.append(FileEdit(url: target, before: existing, after: file.text))
@@ -209,6 +218,67 @@ public struct AgentPack: Codable, Sendable, Equatable {
     private static func relative(_ path: String, to root: URL) -> String? {
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : nil
+    }
+
+    /// True for an argument flag or query name that names a credential,
+    /// matched by whole words so `--path` is not taken for a `pat`.
+    private static func namesSecret(_ name: String) -> Bool {
+        let words = name.lowercased().split { !$0.isLetter && !$0.isNumber }
+        return words.contains { ["token", "secret", "key", "apikey", "password", "passwd", "auth",
+                                 "authorization", "credential", "credentials", "pat"].contains(String($0)) }
+    }
+
+    /// A value that is a literal credential, not a reference to a variable.
+    private static func isSecretValue(_ value: String, named: Bool) -> Bool {
+        guard !value.isEmpty, !value.hasPrefix("$"), !value.hasPrefix("{env:") else { return false }
+        return named || Secrets.looksSecret(value: value)
+            || HealthCheck.secretPattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
+    }
+
+    /// The variable a credential becomes: `--api-key` gives `API_KEY`.
+    private static func variable(_ name: String, fallback: String) -> String {
+        let words = name.uppercased().split { !$0.isLetter && !$0.isNumber }
+        return words.isEmpty ? fallback : words.joined(separator: "_")
+    }
+
+    /// Replaces credentials in `--flag value`, `--flag=value` and bare
+    /// token arguments with references to variables, named in `names`.
+    static func redactArgs(_ args: [String], names: inout [String]) -> [String] {
+        var out = args
+        for i in out.indices {
+            let arg = out[i]
+            if arg.hasPrefix("-"), let eq = arg.firstIndex(of: "=") {
+                let flag = String(arg[..<eq]), value = String(arg[arg.index(after: eq)...])
+                guard isSecretValue(value, named: namesSecret(flag)) else { continue }
+                let name = variable(flag, fallback: "TOKEN")
+                out[i] = flag + "=${\(name)}"
+                names.append(name)
+            } else if !arg.hasPrefix("-") {
+                let flag = i > 0 && args[i - 1].hasPrefix("-") && !args[i - 1].contains("=") ? args[i - 1] : ""
+                guard isSecretValue(arg, named: namesSecret(flag)) else { continue }
+                let name = variable(flag, fallback: "TOKEN")
+                out[i] = "${\(name)}"
+                names.append(name)
+            }
+        }
+        return out
+    }
+
+    /// Replaces credentials in a URL's query string with references to
+    /// variables, named in `names`.
+    static func redactQuery(_ url: String, names: inout [String]) -> String {
+        guard let q = url.firstIndex(of: "?") else { return url }
+        let end = url[q...].firstIndex(of: "#") ?? url.endIndex
+        let items = url[url.index(after: q)..<end].split(separator: "&", omittingEmptySubsequences: false).map { item in
+            guard let eq = item.firstIndex(of: "=") else { return String(item) }
+            let key = String(item[..<eq]), value = String(item[item.index(after: eq)...])
+            let decoded = value.removingPercentEncoding ?? value
+            guard isSecretValue(decoded, named: namesSecret(key)) else { return String(item) }
+            let name = variable(key, fallback: "TOKEN")
+            names.append(name)
+            return key + "=${\(name)}"
+        }
+        return url[...q] + items.joined(separator: "&") + url[end...]
     }
 
     /// Replaces anything that looks like a credential.

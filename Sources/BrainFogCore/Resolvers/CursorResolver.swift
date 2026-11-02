@@ -70,9 +70,7 @@ public struct CursorResolver: ContextResolver {
         }
         let yaml = Frontmatter.split(FileSupport.read(url) ?? "").yaml ?? ""
         let always = Frontmatter.scalar("alwaysApply", in: yaml)?.lowercased() == "true"
-        let globs = Frontmatter.list("globs", in: yaml)
-            .flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
-            .filter { !$0.isEmpty }
+        let globs = Frontmatter.list("globs", in: yaml).flatMap(Frontmatter.commaList)
         let description = Frontmatter.scalar("description", in: yaml)
 
         var timing: LoadTiming

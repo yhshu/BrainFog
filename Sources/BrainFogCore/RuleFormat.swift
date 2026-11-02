@@ -91,8 +91,8 @@ public struct RuleFormat: Sendable, Hashable {
         let lines: [String]?
         switch field.kind {
         case .list:
-            let items = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            lines = items.isEmpty ? nil : ["\(field.key):"] + items.map { "  - \"\($0)\"" }
+            let items = Frontmatter.commaList(v)
+            lines = items.isEmpty ? nil : ["\(field.key):"] + items.map { "  - \(Frontmatter.quoted($0))" }
         case .bool:
             lines = ["\(field.key): \(v == "true" ? "true" : "false")"]
         case .commaText where field.key == "globs":
@@ -110,6 +110,8 @@ extension Frontmatter {
     /// `lines`, or removes it when `lines` is nil. Adds a frontmatter block
     /// when there is none.
     static func replacing(_ key: String, with lines: [String]?, in text: String) -> String {
+        // A leading BOM stays where it is, ahead of the block.
+        if text.hasPrefix("\u{FEFF}") { return "\u{FEFF}" + replacing(key, with: lines, in: String(text.dropFirst())) }
         let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
         let parts = split(normalized)
         guard let yaml = parts.yaml else {
@@ -140,6 +142,6 @@ extension Frontmatter {
         let special = ": #{}[],&*!|>'\"%@`"
         let needs = value.contains { special.contains($0) } || value.hasPrefix(" ") || value.hasPrefix("-")
         guard needs else { return value }
-        return "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        return quoted(value)
     }
 }

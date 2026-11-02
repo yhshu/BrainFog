@@ -40,7 +40,7 @@ for s in sharing.statuses where !s.reads {
     print("  ✗ \(s.agent.displayName): \(s.detail)\(s.fix.map { " → fix: \($0.title)" } ?? "")")
 }
 
-let issues = HealthCheck.run(project: dir, contexts: contexts, servers: allServers)
+let issues = HealthCheck.run(project: dir, contexts: contexts, servers: allServers) + HealthCheck.unreadable(project: dir)
 if !issues.isEmpty { print("\nHealth") }
 for issue in issues {
     print("  \(issue.severity.rawValue): \(issue.title)\(issue.fix.map { " → fix: \($0.title)" } ?? "")")

@@ -18,7 +18,8 @@ public struct CopyPlan: Sendable, Equatable {
     /// had is dropped.
     public var header = ""
     /// File patterns the source was limited to (Claude `paths`, Cursor
-    /// `globs`) that the target can't express, so the copy applies everywhere.
+    /// `globs`, Copilot `applyTo`) that the target can't express, so the copy
+    /// applies everywhere.
     public var lostScope: [String] = []
 
     /// - Parameters:
@@ -28,9 +29,11 @@ public struct CopyPlan: Sendable, Equatable {
     public init?(source: URL, to agent: AgentID, project: URL?, from: AgentID?,
                 environment env: ResolverEnvironment = .init()) {
         let yaml = Frontmatter.split(FileSupport.read(source) ?? "").yaml ?? ""
+        // Copilot's `applyTo: "**"` means every file, so it is no limit.
+        let applyTo = Frontmatter.commaList(Frontmatter.scalar("applyTo", in: yaml) ?? "")
         let scope = (Frontmatter.list("paths", in: yaml) + Frontmatter.list("globs", in: yaml))
-            .flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
-            .filter { !$0.isEmpty }
+            .flatMap(Frontmatter.commaList)
+            + (applyTo.contains("**") || applyTo.contains("**/*") ? [] : applyTo)
         switch agent {
         case .claudeCode:
             // Rule files load at launch unless they declare `paths`, so a
@@ -43,7 +46,7 @@ public struct CopyPlan: Sendable, Equatable {
             mode = .newFile
             sharedWith = []
             if !scope.isEmpty {
-                header = "---\npaths:\n" + scope.map { "  - \"\($0)\"\n" }.joined() + "---\n\n"
+                header = "---\npaths:\n" + scope.map { "  - \(Frontmatter.quoted($0))\n" }.joined() + "---\n\n"
             }
         case .codex:
             let dir = project ?? env.variables["CODEX_HOME"].map {
@@ -126,7 +129,7 @@ public struct CopyPlan: Sendable, Equatable {
             destination = Self.unused(rules.appendingPathComponent("\(name).md"))
             mode = .newFile
             if !scope.isEmpty {
-                header = "---\npaths:\n" + scope.map { "  - \"\($0)\"\n" }.joined() + "---\n\n"
+                header = "---\npaths:\n" + scope.map { "  - \(Frontmatter.quoted($0))\n" }.joined() + "---\n\n"
             }
         }
     }
@@ -167,7 +170,10 @@ public struct CopyPlan: Sendable, Equatable {
 
     private static func unused(_ url: URL) -> URL {
         guard FileManager.default.fileExists(atPath: url.path) else { return url }
-        let base = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
+        // The number goes before Copilot's whole `.instructions.md` suffix.
+        let name = url.lastPathComponent
+        let ext = name.hasSuffix(".instructions.md") ? "instructions.md" : url.pathExtension
+        let base = String(name.dropLast(ext.count + 1))
         var n = 2
         while true {
             let candidate = url.deletingLastPathComponent().appendingPathComponent("\(base)-\(n).\(ext)")

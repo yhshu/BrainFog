@@ -200,7 +200,7 @@ public enum SkillResolver {
             let file = dir.appendingPathComponent(folder).appendingPathComponent("SKILL.md")
             guard let text = FileSupport.read(file) else { return nil }
             let meta = frontmatter(text)
-            let name = meta["name"] ?? folder
+            let name = meta["name"].flatMap { $0.isEmpty ? nil : $0 } ?? folder
             let description = meta["description"] ?? ""
             return Skill(agent: agent, name: name, description: description,
                          url: file.standardizedFileURL, scope: scope, timing: .launch,
@@ -211,7 +211,8 @@ public enum SkillResolver {
     /// Top-level `key: value` pairs of the YAML frontmatter, including
     /// folded (`>`) and literal (`|`) blocks.
     static func frontmatter(_ text: String) -> [String: String] {
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingPrefix("\u{FEFF}").components(separatedBy: "\n")
         guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return [:] }
         var result: [String: String] = [:]
         var key: String?
@@ -230,10 +231,9 @@ public enum SkillResolver {
             flush()
             guard let colon = line.firstIndex(of: ":"), !line.hasPrefix(" ") else { continue }
             let k = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
-            var v = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            let v = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             if [">", "|", ">-", "|-"].contains(v) { key = k; continue }
-            if v.count >= 2, let q = v.first, q == "\"" || q == "'", v.last == q { v = String(v.dropFirst().dropLast()) }
-            result[k] = v
+            result[k] = Frontmatter.unquote(v)
         }
         flush()
         return result

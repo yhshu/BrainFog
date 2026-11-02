@@ -157,7 +157,14 @@ public struct ResolverEnvironment: Sendable {
     public var variables: [String: String]
     public var claudeManagedDirectory: URL
 
-    public init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+    /// The user's home folder, or `BRAINFOG_HOME` when set: a development aid
+    /// that points the whole app at a throwaway folder for testing.
+    public static var defaultHome: URL {
+        ProcessInfo.processInfo.environment["BRAINFOG_HOME"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    public init(home: URL = ResolverEnvironment.defaultHome,
                 variables: [String: String] = ProcessInfo.processInfo.environment,
                 claudeManagedDirectory: URL = URL(fileURLWithPath: "/Library/Application Support/ClaudeCode")) {
         self.home = home.standardizedFileURL

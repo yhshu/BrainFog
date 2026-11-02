@@ -21,15 +21,22 @@ struct TimelineList: View {
     }
 
     var body: some View {
-        let shown = items.filter { query.isEmpty || Search.matches(query, $0.change.url.path) }
+        // A change matches by its file or by an agent that reads it.
+        let shown = items.filter { item in
+            query.isEmpty || Search.matches(query, item.change.url.path)
+                || agents(reading: item.change.url).contains { Search.matches(query, $0.displayName) }
+        }
         VStack(alignment: .leading, spacing: 20) {
             if shown.isEmpty, loaded {
-                if query.isEmpty {
-                    ContentUnavailableView("No Changes Yet", systemImage: "clock.arrow.circlepath",
-                                           description: Text("Changes show up here as you or the agents edit these files."))
-                } else {
-                    ContentUnavailableView.search(text: query)
+                Group {
+                    if query.isEmpty {
+                        ContentUnavailableView("No Changes Yet", systemImage: "clock.arrow.circlepath",
+                                               description: Text("Changes show up here as you or the agents edit these files."))
+                    } else {
+                        ContentUnavailableView.search(text: query)
+                    }
                 }
+                .modifier(EmptyStateFrame())
             }
             ForEach(days(shown), id: \.day) { group in
                 VStack(alignment: .leading, spacing: 8) {
@@ -81,8 +88,10 @@ struct TimelineList: View {
     }
 
     private func agents(reading url: URL) -> [AgentID] {
-        model.contexts.filter { ctx in
+        let configAgents = model.configFiles[url] ?? []
+        return model.contexts.filter { ctx in
             ctx.entries.contains { $0.url.standardizedFileURL == url } || ctx.skills.contains { $0.url.standardizedFileURL == url }
+                || configAgents.contains(ctx.agent)
         }.map(\.agent)
     }
 }

@@ -47,10 +47,31 @@ final class AppModel {
     var pendingDiscard: (() -> Void)?
     /// Goes up after every resolve, which records new versions in History.
     var historyRevision = 0
-    /// Every file the lens shows for the selected place.
+    /// Every file the lens shows for the selected place, including the MCP
+    /// config files BrainFog can edit, so their changes reach the Timeline.
     var shownFiles: Set<URL> {
-        Set(contexts.flatMap { $0.entries.map(\.url) + $0.skills.map(\.url) }.filter(\.isFileURL)
-            .map(\.standardizedFileURL))
+        Self.files(contexts, configFiles)
+    }
+    /// The MCP config files BrainFog can edit here that exist, even with no
+    /// servers left in them, and the agents that read each. Files only an
+    /// agent's own CLI changes (like ~/.claude.json) are left out: they are
+    /// rewritten constantly.
+    var configFiles: [URL: [AgentID]] = [:]
+
+    nonisolated static func files(_ contexts: [ResolvedContext], _ configs: [URL: [AgentID]]) -> Set<URL> {
+        let instructions = contexts.flatMap { $0.entries.map(\.url) + $0.skills.map(\.url) }
+        return Set(instructions.filter(\.isFileURL).map(\.standardizedFileURL)).union(configs.keys)
+    }
+
+    nonisolated static func configFiles(project: URL?) -> [URL: [AgentID]] {
+        var out: [URL: [AgentID]] = [:]
+        for agent in AgentID.allCases {
+            for file in MCPResolver.editableFiles(for: agent, project: project).map(\.file)
+            where FileManager.default.fileExists(atPath: file.path) {
+                out[file.standardizedFileURL, default: []].append(agent)
+            }
+        }
+        return out
     }
 
     private let addedKey = "addedProjects"
@@ -91,6 +112,10 @@ final class AppModel {
     }
 
     func setHidden(_ url: URL, _ hide: Bool) {
+        if hide, selection == .project(url), hasUnsavedEdits {
+            whenEditsAreSafe { [self] in setHidden(url, hide) }
+            return
+        }
         var hidden = UserDefaults.standard.stringArray(forKey: hiddenKey) ?? []
         hidden.removeAll { $0 == url.path }
         if hide { hidden.append(url.path) }
@@ -102,6 +127,10 @@ final class AppModel {
     /// Drops a project from BrainFog without touching its files. Discovered
     /// projects stay out until the user adds them again.
     func removeProject(_ url: URL) {
+        if selection == .project(url), hasUnsavedEdits {
+            whenEditsAreSafe { [self] in removeProject(url) }
+            return
+        }
         let defaults = UserDefaults.standard
         defaults.set((defaults.stringArray(forKey: addedKey) ?? []).filter { $0 != url.path }, forKey: addedKey)
         defaults.set((defaults.stringArray(forKey: hiddenKey) ?? []).filter { $0 != url.path }, forKey: hiddenKey)
@@ -111,6 +140,10 @@ final class AppModel {
     }
 
     func addProject(_ url: URL) {
+        if hasUnsavedEdits {
+            whenEditsAreSafe { [self] in addProject(url) }
+            return
+        }
         let url = url.standardizedFileURL
         let defaults = UserDefaults.standard
         defaults.set((defaults.stringArray(forKey: removedKey) ?? []).filter { $0 != url.path }, forKey: removedKey)
@@ -127,7 +160,7 @@ final class AppModel {
         guard let place = selection else { contexts = []; return }
         isResolving = true
         resolveTask = Task {
-            let (result, servers, sharing, globalSync, health) = await Task.detached(priority: .userInitiated) {
+            let (result, servers, configs, sharing, globalSync, health) = await Task.detached(priority: .userInitiated) {
                 let result = Self.contexts(for: place)
                 let project: URL? = if case .project(let url) = place { url } else { nil }
                 let servers = Dictionary(uniqueKeysWithValues: AgentID.allCases.map {
@@ -137,17 +170,20 @@ final class AppModel {
                 let globalSync = project == nil ? GlobalSyncReport.analyze() : nil
                 let health = HealthCheck.run(project: project, contexts: result,
                                              servers: servers.values.flatMap { $0 })
+                    + HealthCheck.unreadable(project: project)
                     + (globalSync?.issues() ?? [])
                 // Keep a version of every file as it is now, so changes made
                 // by the agents themselves show up in each file's history.
-                for url in Set(result.flatMap { $0.entries.map(\.url) + $0.skills.map(\.url) }) where url.isFileURL {
+                let configs = Self.configFiles(project: project)
+                for url in Self.files(result, configs) {
                     History.shared.observe(url)
                 }
-                return (result, servers, sharing, globalSync, health)
+                return (result, servers, configs, sharing, globalSync, health)
             }.value
             guard !Task.isCancelled else { return }
             contexts = result
             self.servers = servers
+            configFiles = configs
             self.sharing = sharing
             self.globalSync = globalSync
             self.health = health
@@ -157,9 +193,10 @@ final class AppModel {
             if let current = selectedEntry {
                 let all = result.flatMap { $0.entries + $0.skills.map(\.entry) }
                 // A file the agent doesn't list (say, an empty one it skips)
-                // stays open as long as it exists.
+                // stays open as long as it exists, or while it has unsaved
+                // edits, so deleting it elsewhere doesn't lose them.
                 selectedEntry = all.first { $0.url == current.url && $0.agent == current.agent }
-                    ?? (FileManager.default.fileExists(atPath: current.url.path) ? current : nil)
+                    ?? (hasUnsavedEdits || FileManager.default.fileExists(atPath: current.url.path) ? current : nil)
             }
         }
     }
@@ -217,11 +254,12 @@ final class AppModel {
 
     static let packType = UTType(filenameExtension: AgentPack.fileExtension, conformingTo: .json) ?? .json
 
-    /// Applies a reviewed change, then opens its first file.
+    /// Applies a reviewed change, then opens its first file unless the
+    /// editor has unsaved edits.
     func apply(_ change: ChangeSet) throws {
         try change.apply()
         pendingChange = nil
-        if let first = change.edits.first {
+        if let first = change.edits.first, !hasUnsavedEdits {
             selectedEntry = ContextEntry(agent: contexts.first { ctx in ctx.entries.contains { $0.url == first.url } }?.agent
                                             ?? .claudeCode,
                                          url: first.url, scope: .project, timing: .launch)
@@ -249,7 +287,7 @@ final class AppModel {
             // Resolve from an empty folder so only machine-wide layers remain.
             let probe = FileManager.default.temporaryDirectory.appendingPathComponent("brainfog-global-probe")
             try? FileManager.default.createDirectory(at: probe, withIntermediateDirectories: true)
-            let claudeHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path + "/"
+            let claudeHome = ResolverEnvironment.defaultHome.appendingPathComponent(".claude").path + "/"
             return Resolvers.resolveAll(workingDirectory: probe).map { ctx in
                 var ctx = ctx
                 // Imports come right after the file that pulls them in, so one

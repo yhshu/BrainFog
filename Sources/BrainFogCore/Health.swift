@@ -55,20 +55,49 @@ public enum HealthCheck {
         return issues.sorted { $0.severity > $1.severity }
     }
 
+    /// Problems that make an agent quietly read nothing: MCP config files it
+    /// can't parse, and instruction files that are links to nowhere.
+    public static func unreadable(project: URL?, environment env: ResolverEnvironment = .init()) -> [HealthIssue] {
+        var byFile: [URL: [AgentID]] = [:]
+        for agent in AgentID.allCases {
+            for url in MCPResolver.unreadableFiles(for: agent, project: project, environment: env) {
+                byFile[url.standardizedFileURL, default: []].append(agent)
+            }
+        }
+        var issues = byFile.sorted { $0.key.path < $1.key.path }.map { url, agents in
+            HealthIssue(severity: .error, title: "\(url.lastPathComponent) can’t be read",
+                        detail: "It isn’t valid JSON, so its MCP servers aren’t listed here, and the agent may skip them or fail to start.",
+                        url: url, agents: agents, fix: nil)
+        }
+        if let project {
+            let names = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md"]
+            for name in names {
+                let url = project.appendingPathComponent(name)
+                guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path),
+                      !FileManager.default.fileExists(atPath: url.path) else { continue }
+                issues.append(HealthIssue(severity: .warning, title: "\(name) links to a missing file",
+                                          detail: "It points to \(dest), which doesn’t exist, so no agent reads it.",
+                                          url: url, agents: [], fix: nil))
+            }
+        }
+        return issues
+    }
+
     /// Personal files that would be committed by accident.
     static func localFilesNotIgnored(project: URL) -> [HealthIssue] {
         let root = FileSupport.gitRoot(of: project) ?? project
         guard FileSupport.exists(root.appendingPathComponent(".git")) else { return [] }
         let gitignore = root.appendingPathComponent(".gitignore")
+        // Trimming newlines too drops the \r of a Windows-saved file.
         let ignored = (FileSupport.read(gitignore) ?? "").components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") && !$0.hasPrefix("!") }
         var issues: [HealthIssue] = []
         for name in ["CLAUDE.local.md", ".claude/settings.local.json", "AGENTS.local.md", ".devin/mcp_config.local.json"] {
             let url = project.appendingPathComponent(name)
             guard FileSupport.isFile(url) else { continue }
             let rel = String(url.path.dropFirst(root.path.count + 1))
-            let patterns = [name, rel, "/" + rel, "**/" + name, (name as NSString).lastPathComponent]
-            if ignored.contains(where: { patterns.contains($0) }) { continue }
+            if ignored.contains(where: { Self.gitignore($0, matches: rel) }) { continue }
             issues.append(HealthIssue(
                 severity: .warning, title: "\(name) isn’t in .gitignore",
                 detail: "It holds your personal settings for this project and is meant to stay out of the repository.",
@@ -77,6 +106,24 @@ public enum HealthCheck {
                                edits: [FileEdit.append(rel + "\n", to: gitignore)])))
         }
         return issues
+    }
+
+    /// Whether a .gitignore line ignores `rel`, a path from the repository
+    /// root: a pattern without a slash matches a name at any depth, one with
+    /// a slash matches from the root, and a match on a folder covers what's in it.
+    static func gitignore(_ line: String, matches rel: String) -> Bool {
+        var pattern = line
+        let folderOnly = pattern.hasSuffix("/")
+        if folderOnly { pattern.removeLast() }
+        if pattern.hasPrefix("**/") { pattern.removeFirst(3) }
+        let anchored = pattern.contains("/")
+        if pattern.hasPrefix("/") { pattern.removeFirst() }
+        let parts = rel.split(separator: "/").map(String.init)
+        for end in parts.indices where !(folderOnly && end == parts.count - 1) {
+            let subject = anchored ? parts[...end].joined(separator: "/") : parts[end]
+            if fnmatch(pattern, subject, FNM_PATHNAME) == 0 { return true }
+        }
+        return false
     }
 
     /// Well-known API key and token shapes.
