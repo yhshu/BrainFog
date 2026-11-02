@@ -16,9 +16,9 @@ Every agent has its own set of "memory": human-written instruction files (CLAUDE
 | 2 | **Layered browsing and editing** | An agent × layer matrix (managed / user / project / local / directory / auto memory / rules), with in-place editing, detection of external modifications, and conflict warnings. |
 | 3 | **`.agentpack` import/export** | Bundles memory, instructions, rules, skills, and MCP configuration; secrets are stripped automatically on export; before import, a per-file diff preview is shown and paths are remapped for the target agent. |
 | 4 | **Timeline and rollback** | Watches (FSEvents) agent writes and takes content-addressed snapshots automatically; "what did Claude record about this project yesterday", with one-click rollback. |
-| 5 | **Health checks** (across all of the above) | MEMORY.md over 200 lines/25KB, Codex over 32KiB, empty files, broken `@import`s, CLAUDE.local.md unintentionally shadowing AGENTS.md, and so on. |
+| 5 | **Health checks** (across all of the above) | Credentials in instruction files and in project MCP configs, empty files read every session, starting context over 20k tokens, personal files missing from .gitignore, MCP configs that can't be parsed, instruction files that link to nowhere, and global copies that drifted from their source. Truncation (MEMORY.md's 200 lines/25KB, Codex's 32 KiB) and missing `@import` targets are shown on the file in the Context Lens. |
 
-Future directions (after MVP): compiling a single source to multiple formats (CLAUDE.md ⇄ AGENTS.md ⇄ OpenCode instructions), drift detection, cross-machine sync.
+Future directions: compiling a single source to multiple formats (CLAUDE.md ⇄ AGENTS.md ⇄ OpenCode instructions), cross-machine sync.
 
 ## 3. Per-agent loading rules (basis for the resolvers; checked against official docs, 2026-10)
 
@@ -32,6 +32,7 @@ Future directions (after MVP): compiling a single source to multiple formats (CL
 7. `@path` imports: resolved relative to the containing file, at most 4 hops.
 8. Auto memory: `~/.claude/projects/<encoded git root path>/memory/MEMORY.md`; at startup only the first 200 lines or 25KB are loaded; topic files are read on demand. `autoMemoryDirectory` changes the location, and `autoMemoryEnabled` turns it off. Encoding: characters in the path other than `[A-Za-z0-9-]` are replaced with `-`.
 9. `claudeMdExcludes`: excludes by absolute-path glob (except managed).
+10. MCP servers in a project's `.mcp.json` need the user's approval. `enabledMcpjsonServers` and `disabledMcpjsonServers` in `.claude/settings.json` or `.claude/settings.local.json` record the answer; a server in neither list is asked about when a session starts, unless `enableAllProjectMcpServers` is true.
 
 ### Codex
 1. Under `CODEX_HOME` (default `~/.codex`), `AGENTS.override.md`, otherwise `AGENTS.md`; the first non-empty one is used.
@@ -92,22 +93,30 @@ Cline ships two engines in one extension and picks one per user, which can't be 
 BrainFog (SwiftUI app, macOS 26+)
  ├─ BrainFogCore (pure Foundation, testable, no UI)
  │   ├─ Model        AgentID / Scope / ContextEntry / ResolvedContext / Diagnostic
- │   ├─ Resolvers    ClaudeCodeResolver / CodexResolver / OpenCodeResolver / CursorResolver
+ │   ├─ Resolvers    one per agent: Claude Code, Codex, OpenCode, Cursor, Gemini CLI, Copilot, Devin, Cline
  │   ├─ Support      import parsing, frontmatter, glob, token estimation, path encoding, JSONC
  │   ├─ Stores       CodexMemoryStore (SQLite, read-only)
- │   ├─ MCP          per-agent server discovery; copy between agents (JSON/JSONC edits keep comments, Codex TOML tables)
+ │   ├─ Skills       skill discovery per agent and layer
+ │   ├─ Creating     the new instruction and rule files each agent can have here
+ │   ├─ Copying      copies a file to another agent, converting its rule format and scope
+ │   ├─ MCP          per-agent server discovery, approval state; add, edit, remove, switch, copy (JSON/JSONC edits keep comments and line endings, Codex TOML tables)
  │   ├─ Sharing      who reads AGENTS.md, import fixes, moving CLAUDE.md into AGENTS.md
- │   ├─ Health       credentials in files, unignored local files, oversized context
+ │   ├─ GlobalSync   one source for global instructions, marked copies, drift
+ │   ├─ Health       see §2; fixes are ChangeSets where there is an obvious one
  │   ├─ RuleFormat   frontmatter forms per rule kind
- │   ├─ History      content-addressed versions of every file seen or written; ChangeSet/FileEdit with conflict check
- │   └─ Pack         .agentpack read/write, secret stripping, import as a ChangeSet
- └─ App              windows, sidebar, Context Lens, editor
+ │   ├─ History      content-addressed versions of every file seen or written; ChangeSet/FileEdit with a conflict check, applied all or nothing, writing through symlinks
+ │   ├─ Pack         .agentpack read/write, secret stripping (env, headers, arguments, URL queries), import as a ChangeSet
+ │   └─ ProjectDiscovery  projects Claude Code and Codex already know
+ └─ App              sidebar, Context Lens, Skills, MCP Servers, Timeline, editor; FSEvents watching
 ```
 
 Principles:
 - **Resolvers are pure functions**: input (cwd, home, environment variables, filesystem) → output `ResolvedContext`; unit-tested with temporary directories.
 - **Minimal intrusion into agent data**: only write files the user explicitly edits; compare mtime/content before writing and warn on conflict; every write is snapshotted to the timeline first.
+- **Every change is previewed as a diff**, except switching an MCP server off, which only takes something away; it happens at once and stays in History. Turning a server on, or approving a Claude project server, is previewed because it lets a command run.
+- **Unsaved edits are never dropped silently**: anything that would close or replace the editor asks first, and a file deleted elsewhere stays open so it can be saved back.
 - **Uncertain rules are explicitly labeled**; no pretending to be exact.
+- **Testing never touches the user's files**: tests use a temporary home through `ResolverEnvironment`, and `BRAINFOG_HOME` points the whole app at a throwaway home folder.
 
 ## 5. Design language
 
@@ -115,17 +124,18 @@ Principles:
 - Toolbar controls are system toolbar items, so they share one size and capsule. The header of the agent being read is pinned in a bar under the toolbar, inside the toolbar's scroll edge effect.
 - On a project page, paths inside the project are shown relative to it.
 - Each agent has a stable identifying color, applied to its icon, token bar and selected rows.
-- Keyboard first: ⌘S save, ⌘R rescan, ⌘1/2/3 switch agent.
+- Keyboard first: ⌘S save, ⌘R reload files, Esc close the editor, ⇧⌘I / ⇧⌘E import and export an agent pack.
 
 ## 6. Milestones
 
 | Phase | Scope |
 |---|---|
 | MVP-0 | Project skeleton, resolvers + tests, first UI for Context Lens and global/project browsing and editing |
-| MVP-1 (current) | Gemini CLI, Copilot, Devin, Cline; MCP view and copy; shared AGENTS.md fixes; health checks; frontmatter forms; history with restore; every write previewed as a diff |
+| MVP-1 | Gemini CLI, Copilot, Devin, Cline; MCP view and copy; shared AGENTS.md fixes; health checks; frontmatter forms; history with restore; changes previewed as a diff (done) |
 | MVP-2 | `.agentpack` format, secret stripping, import diff preview; skills and MCP connectors included (done: one JSON file; File → Import/Export Agent Pack) |
 | MVP-3 | Timeline view across files, with undo; FSEvents watching instead of snapshots on refresh (done) |
-| Later | Single-source global instructions with drift detection (done: Claude imports the source, other agents get marked copies); signing, notarization and updates |
+| 0.1.0 preview | Single-source global instructions with drift detection (done: Claude imports the source, other agents get marked copies); edge-case tests for every create/read/update/delete path (done) |
+| Next | Signing, notarization and updates; checking each resolver against the agents' current docs |
 
 ## 7. Competitors and references (research only; no code reused)
 
