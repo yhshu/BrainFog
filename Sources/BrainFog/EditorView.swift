@@ -6,7 +6,6 @@ import BrainFogCore
 /// changed on disk since it was opened, unless the user says so.
 struct EditorView: View {
     @Environment(AppModel.self) private var model
-    @AppStorage("autoSave") private var autoSave = false
     let entry: ContextEntry
 
     @State private var text = ""
@@ -85,11 +84,10 @@ struct EditorView: View {
         .task { load() }
         .onChange(of: isDirty, initial: true) { model.hasUnsavedEdits = isDirty }
         .onDisappear { model.hasUnsavedEdits = false }
-        .task(id: text) {
-            // Auto save a moment after typing stops.
-            guard autoSave, isDirty else { return }
-            try? await Task.sleep(for: .seconds(1))
-            if !Task.isCancelled { save(force: false) }
+        // Show what an agent (or anything else) wrote, unless there are edits
+        // to keep; then saving reports the conflict instead.
+        .onChange(of: model.historyRevision) {
+            if !isDirty, entry.url.isFileURL, modified() != loadedModified { load() }
         }
         .alert("The file changed on disk", isPresented: $conflict) {
             Button("Overwrite", role: .destructive) { save(force: true) }
@@ -105,17 +103,15 @@ struct EditorView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             if isDirty {
-                Text(autoSave ? "Saving…" : "Unsaved").font(.caption).foregroundStyle(.orange)
+                Text("Unsaved").font(.caption).foregroundStyle(.orange)
             }
             Spacer()
             historyMenu
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
                 .disabled(!entry.url.isFileURL)
-            if !autoSave {
-                Button("Revert") { text = original; restoring = nil }
-                    .disabled(!isDirty)
-                    .help("Discard unsaved edits")
-            }
+            Button("Revert") { text = original; restoring = nil }
+                .disabled(!isDirty)
+                .help("Discard unsaved edits")
             Button("Save") { save(force: false) }
                 .keyboardShortcut("s")
                 .buttonStyle(.borderedProminent)
@@ -188,7 +184,8 @@ struct EditorView: View {
     }
 
     private func modified() -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: entry.url.path))?[.modificationDate] as? Date
+        // The target's date: a link's own date doesn't change when the file does.
+        (try? FileManager.default.attributesOfItem(atPath: entry.url.resolvingSymlinksInPath().path))?[.modificationDate] as? Date
     }
 
     private func load() {
@@ -307,6 +304,8 @@ private struct DraftField: View {
     }
 
     private func commit() {
+        // Leaving the field untouched mustn't rewrite the value in a new form.
+        guard draft != RuleFormat.value(of: field, in: text) else { return }
         let new = RuleFormat.setting(field, to: draft, in: text)
         if new != text { text = new }
     }

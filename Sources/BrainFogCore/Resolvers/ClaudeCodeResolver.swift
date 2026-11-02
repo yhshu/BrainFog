@@ -88,6 +88,16 @@ public struct ClaudeCodeResolver: ContextResolver {
             add(url, url.lastPathComponent == "CLAUDE.local.md" ? .local : .directory,
                 .onDemand("when Claude reads or edits files in \(rel)/"))
         }
+        // A subfolder's AGENTS.md stands in when it has no CLAUDE file of its own.
+        for url in FileSupport.walk(cwd, maxDepth: 5, include: { $0.lastPathComponent == "AGENTS.md" })
+        where url.deletingLastPathComponent().path != cwd.path && url.deletingLastPathComponent().lastPathComponent != ".claude" {
+            let dir = url.deletingLastPathComponent()
+            guard !["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"].contains(where: {
+                FileSupport.isFile(dir.appendingPathComponent($0))
+            }) else { continue }
+            let rel = dir.path.dropFirst(cwd.path.count + 1)
+            add(url, .directory, .onDemand("when Claude reads files in \(rel)/, which has no CLAUDE.md"))
+        }
 
         // 4. Auto memory.
         addAutoMemory(cwd: cwd, projectRoot: projectRoot, claudeHome: claudeHome,

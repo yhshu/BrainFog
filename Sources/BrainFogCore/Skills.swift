@@ -44,6 +44,9 @@ public enum SkillResolver {
         let codexHome = env.variables["CODEX_HOME"].map {
             URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
         } ?? env.home.appendingPathComponent(".codex")
+        let copilotHome = env.variables["COPILOT_HOME"].map {
+            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
+        } ?? env.home.appendingPathComponent(".copilot")
         let configHome = env.variables["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }
             ?? env.home.appendingPathComponent(".config")
 
@@ -76,13 +79,16 @@ public enum SkillResolver {
             scan(URL(fileURLWithPath: "/etc/codex/skills"), .managed)
             scan(codexHome.appendingPathComponent("skills/.system"), .bundled, note: "ships with Codex")
         case .openCode:
+            let claudeSkills = !env.flag("OPENCODE_DISABLE_CLAUDE_CODE") && !env.flag("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")
             for dir in projectDirs.reversed() {
-                for sub in [".opencode/skills", ".claude/skills", ".agents/skills"] {
+                for sub in [".opencode/skills", ".claude/skills", ".agents/skills"] where claudeSkills || sub != ".claude/skills" {
                     scan(dir.appendingPathComponent(sub), .project)
                 }
             }
             scan(configHome.appendingPathComponent("opencode/skills"), .user)
-            scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "shared with Claude Code")
+            if claudeSkills {
+                scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "shared with Claude Code")
+            }
             scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
             // Names must be unique across all locations.
             var seen = Set<String>()
@@ -121,7 +127,7 @@ public enum SkillResolver {
                 scan(dir.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code")
                 scan(dir.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
             }
-            scan(env.home.appendingPathComponent(".copilot/skills"), .user)
+            scan(copilotHome.appendingPathComponent("skills"), .user)
             scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
             scan(env.home.appendingPathComponent(".claude/skills"), .user, note: "VS Code’s Local agent only")
         case .devin:
@@ -135,18 +141,20 @@ public enum SkillResolver {
             scan(env.home.appendingPathComponent(".config/devin/skills"), .user)
             scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
             scan(env.home.appendingPathComponent(".codeium/windsurf/skills"), .user, note: "Windsurf location, still read")
-            scan(env.home.appendingPathComponent(".copilot/skills"), .user, note: "imported from Copilot")
+            scan(copilotHome.appendingPathComponent("skills"), .user, note: "imported from Copilot")
         case .cline:
-            // On a name clash the global skill wins.
+            // Cline reads these in reverse and the last one read wins a name
+            // clash, so they are listed winner first. Only the workspace root
+            // is searched, not the folders below it.
             let clineHome = env.variables["CLINE_DIR"].map { URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home)) }
                 ?? env.home.appendingPathComponent(".cline")
-            scan(clineHome.appendingPathComponent("skills"), .user)
             scan(env.home.appendingPathComponent(".agents/skills"), .user, note: "shared with Codex")
-            for dir in projectDirs.reversed() {
-                scan(dir.appendingPathComponent(".clinerules/skills"), .project)
-                scan(dir.appendingPathComponent(".cline/skills"), .project)
-                scan(dir.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code")
-                scan(dir.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
+            scan(clineHome.appendingPathComponent("skills"), .user)
+            if let root = projectDirs.first {
+                scan(root.appendingPathComponent(".agents/skills"), .project, note: "shared with Codex")
+                scan(root.appendingPathComponent(".claude/skills"), .project, note: "shared with Claude Code")
+                scan(root.appendingPathComponent(".cline/skills"), .project)
+                scan(root.appendingPathComponent(".clinerules/skills"), .project)
             }
         }
         // Where two folders hold the same skill name, the first one listed wins.

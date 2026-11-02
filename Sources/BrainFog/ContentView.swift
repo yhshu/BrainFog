@@ -5,6 +5,7 @@ import BrainFogCore
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var window: NSWindow?
+    @State private var closeGuard: CloseGuard?
     /// How much the window grew to make room for the editor, given back on close.
     @State private var grownBy: CGFloat = 0
     @AppStorage("editorWidth") private var editorWidth = 480.0
@@ -53,6 +54,12 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The file in the editor has edits that aren’t saved yet.")
+        }
+        .onChange(of: window) {
+            guard let window, !(window.delegate is CloseGuard) else { return }
+            let guard_ = CloseGuard(model: model, inner: window.delegate)
+            window.delegate = guard_
+            closeGuard = guard_
         }
         .onChange(of: model.selectedEntry != nil) { _, open in
             resizeForEditor(open: open)
@@ -125,6 +132,33 @@ private struct ColumnResizer: View {
     }
 }
 
+/// Closing the window with unsaved edits asks first, as quitting does.
+/// It stands in for SwiftUI's own window delegate and passes everything
+/// else on to it.
+@MainActor final class CloseGuard: NSObject, NSWindowDelegate {
+    let model: AppModel
+    weak var inner: NSWindowDelegate?
+
+    init(model: AppModel, inner: NSWindowDelegate?) {
+        self.model = model
+        self.inner = inner
+    }
+
+    func windowShouldClose(_ window: NSWindow) -> Bool {
+        guard model.hasUnsavedEdits else { return inner?.windowShouldClose?(window) ?? true }
+        model.whenEditsAreSafe { [weak window] in window?.close() }
+        return false
+    }
+
+    override func responds(to selector: Selector!) -> Bool {
+        super.responds(to: selector) || inner?.responds(to: selector) == true
+    }
+
+    override func forwardingTarget(for selector: Selector!) -> Any? {
+        inner?.responds(to: selector) == true ? inner : nil
+    }
+}
+
 /// Hands the hosting NSWindow to SwiftUI.
 private struct WindowReader: NSViewRepresentable {
     @Binding var window: NSWindow?
@@ -142,7 +176,6 @@ private struct WindowReader: NSViewRepresentable {
 
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
-    @State private var showHidden = false
 
     var body: some View {
         // Leaving the page closes the editor, so ask first about unsaved edits.
@@ -156,36 +189,7 @@ struct Sidebar: View {
                         .lineLimit(1)
                         .help(project.url.path)
                         .tag(Place.project(project.url))
-                        .contextMenu { menu(for: project.url, hidden: false) }
-                }
-            }
-            if !model.hiddenProjects.isEmpty {
-                Section {
-                    if showHidden {
-                        ForEach(model.hiddenProjects, id: \.url) { project in
-                            Text(project.url.lastPathComponent)
-                                .lineLimit(1)
-                                .foregroundStyle(.secondary)
-                                .help(project.url.path)
-                                .tag(Place.project(project.url))
-                                .contextMenu { menu(for: project.url, hidden: true) }
-                        }
-                    }
-                } header: {
-                    // A visible chevron, unlike the built-in one that shows only on hover.
-                    Button {
-                        withAnimation { showHidden.toggle() }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("Hidden (\(model.hiddenProjects.count))")
-                            Image(systemName: "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                                .rotationEffect(.degrees(showHidden ? 90 : 0))
-                            Spacer()
-                        }
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
+                        .contextMenu { menu(for: project.url) }
                 }
             }
         }
@@ -197,11 +201,11 @@ struct Sidebar: View {
         }
     }
 
-    @ViewBuilder private func menu(for url: URL, hidden: Bool) -> some View {
-        Button(hidden ? "Show in Sidebar" : "Hide from Sidebar") { model.setHidden(url, !hidden) }
+    @ViewBuilder private func menu(for url: URL) -> some View {
         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         Divider()
-        // Only BrainFog forgets the project; nothing on disk changes.
+        // Only BrainFog forgets the project; nothing on disk changes, and
+        // adding the folder again brings it back.
         Button("Remove from BrainFog") { model.removeProject(url) }
     }
 

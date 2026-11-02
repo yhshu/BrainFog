@@ -1,3 +1,4 @@
+import CoreImage
 import AppKit
 import SwiftUI
 import BrainFogCore
@@ -6,7 +7,6 @@ import BrainFogCore
 struct BrainFogApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var model = AppModel()
-    @AppStorage("autoSave") private var autoSave = false
 
     var body: some Scene {
         WindowGroup("BrainFog") {
@@ -17,9 +17,6 @@ struct BrainFogApp: App {
         }
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(after: .saveItem) {
-                Toggle("Auto Save", isOn: $autoSave)
-            }
             CommandGroup(replacing: .importExport) {
                 Button("Import Agent Pack…") { model.importPack() }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
@@ -172,27 +169,45 @@ enum InstalledArtwork {
     @MainActor private static func find(_ agent: AgentID) -> NSImage? {
         switch agent {
         case .copilot:
-            // The Copilot extension's own glyph, in VS Code or Cursor.
-            for id in ["github.copilot", "github.copilot-chat"] {
-                if let url = newest(extension: id, files: ["assets/font-icons/Github-Copilot.svg",
-                                                           "assets/font-icons/GitHub-Copilot.svg"]) {
-                    return NSImage(contentsOf: url)
-                }
-            }
-            return nil
+            // VS Code now ships Copilot built in, with its current mark; older
+            // installs have it in a Copilot extension instead.
+            let builtIn = ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"].lazy
+                .compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
+                .map { $0.appendingPathComponent("Contents/Resources/app/extensions/copilot/assets/copilot.png") }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
+            let url = builtIn
+                ?? newest(extension: "github.copilot-chat", files: ["assets/copilot.png"])
+                ?? newest(extension: "github.copilot", files: ["assets/copilot.png"])
+            // Dark strokes on an opaque white face: keep only the strokes.
+            return url.flatMap(darkStrokes)
         default:
             return nil
         }
     }
 
+    /// The dark parts of an image as an opaque mask, so a dark-on-white
+    /// icon can be drawn as a one-colour template.
+    private static func darkStrokes(_ url: URL) -> NSImage? {
+        guard let input = CIImage(contentsOf: url) else { return nil }
+        let white = CIImage(color: .white).cropped(to: input.extent)
+        let mask = input.composited(over: white)
+            .applyingFilter("CIColorInvert")
+            .applyingFilter("CIMaskToAlpha")
+        guard let cg = CIContext().createCGImage(mask, from: input.extent) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: input.extent.width, height: input.extent.height))
+    }
+
     /// The first of `files` inside the newest installed version of a VS Code
-    /// (or Cursor, or VS Code Insiders) extension.
+    /// (or Cursor, or VS Code Insiders) extension. Versions the editor has
+    /// uninstalled but not yet deleted are listed in `.obsolete` and skipped.
     private static func newest(extension id: String, files: [String]) -> URL? {
         let home = ResolverEnvironment.defaultHome
         let roots = [".vscode/extensions", ".vscode-insiders/extensions", ".cursor/extensions"].map { home.appendingPathComponent($0) }
         for root in roots {
+            let obsolete = (try? JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(".obsolete"))))
+                as? [String: Any] ?? [:]
             let folders = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
-                .filter { $0.lowercased().hasPrefix(id + "-") }
+                .filter { $0.lowercased().hasPrefix(id + "-") && obsolete[$0] == nil }
                 .sorted { $0.localizedStandardCompare($1) == .orderedDescending }
             for folder in folders {
                 for file in files {
@@ -208,8 +223,9 @@ enum InstalledArtwork {
 /// BrainFog's own stand-in mark for an agent: not the vendor's logo, just a
 /// squircle in the agent's colours with a glyph for how it's used. Sized to
 /// the macOS icon grid (824/1024 body) so it sits level with real app icons.
-/// Where the agent installs its own glyph (Copilot), that is drawn instead;
-/// where it doesn't, the mark is the agent's initials rather than a guess.
+/// The glyph is a simple drawing in the spirit of the agent's mark, so every
+/// agent is recognisable even when it isn't installed; Copilot uses the
+/// glyph VS Code ships when VS Code is there.
 struct AgentMark: View {
     let agent: AgentID
     var size: CGFloat = 34
@@ -237,8 +253,8 @@ struct AgentMark: View {
         case .cursor: [Color(white: 0.26), Color(white: 0.12)]
         case .geminiCLI: [Color(white: 1), Color(white: 0.94)]
         case .copilot: [Color(white: 0.20), Color(white: 0.08)]
-        case .devin: [Color(white: 0.20), Color(white: 0.08)]
-        case .cline: [Color(white: 0.20), Color(white: 0.08)]
+        case .devin: [Color(red: 0.09, green: 0.10, blue: 0.12), Color(red: 0.04, green: 0.05, blue: 0.07)]
+        case .cline: [Color(red: 0.27, green: 0.30, blue: 0.34), Color(red: 0.19, green: 0.21, blue: 0.25)]
         }
         return LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
     }
@@ -280,21 +296,91 @@ struct AgentMark: View {
                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
         case .copilot:
             if let glyph = InstalledArtwork.glyph(for: .copilot) {
+                // The artwork leaves about 15% empty on each side.
                 Image(nsImage: glyph).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                    .frame(width: body_ * 0.56)
+                    .frame(width: body_ * 0.8)
                     .foregroundStyle(.white)
             } else {
-                initials("Co")
+                copilotMark
             }
-        case .devin: initials("D")
-        case .cline: initials("Cl")
+        case .devin: devinMark
+        case .cline: clineMark
         }
     }
 
-    private func initials(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: body_ * (text.count > 1 ? 0.38 : 0.46), weight: .bold, design: .rounded))
-            .foregroundStyle(.white)
+    /// Devin's mark: three hexagons, two stacked on the left and one between
+    /// them on the right, in white.
+    private var devinMark: some View {
+        Canvas { ctx, size in
+            let r = size.width * 0.5 / 4.2
+            let w = r * 3.squareRoot() / 2
+            let mid = CGPoint(x: size.width / 2, y: size.height / 2)
+            var path = Path()
+            for c in [CGPoint(x: mid.x - w * 1.05, y: mid.y - r * 1.15), CGPoint(x: mid.x - w * 1.05, y: mid.y + r * 1.15),
+                      CGPoint(x: mid.x + w * 0.95, y: mid.y)] {
+                let corners = (0..<6).map { i -> CGPoint in
+                    let a = Double(i) * .pi / 3 - .pi / 2
+                    return CGPoint(x: c.x + r * cos(a), y: c.y + r * sin(a))
+                }
+                path.addLines(corners)
+                path.closeSubpath()
+            }
+            ctx.fill(path, with: .color(.white))
+            ctx.stroke(path, with: .color(.white), style: StrokeStyle(lineWidth: r * 0.18, lineJoin: .round))
+        }
+        .frame(width: body_, height: body_)
+    }
+
+    /// Cline's robot in white line art: a rounded head with an antenna,
+    /// angle-bracket ears and two upright eyes. Drawn on a 128-point grid.
+    private var clineMark: some View {
+        Canvas { ctx, size in
+            let u = size.width / 128
+            func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: x * u, y: y * u) }
+            let line = StrokeStyle(lineWidth: 7 * u, lineCap: .round, lineJoin: .round)
+            ctx.stroke(Path(roundedRect: CGRect(x: 36 * u, y: 41 * u, width: 56 * u, height: 48 * u),
+                            cornerRadius: 13 * u, style: .continuous), with: .color(.white), style: line)
+            ctx.fill(Path(roundedRect: CGRect(x: 56 * u, y: 25 * u, width: 16 * u, height: 13 * u), cornerRadius: 4 * u),
+                     with: .color(.white))
+            var ears = Path()
+            ears.addLines([pt(32, 56), pt(25, 65), pt(32, 74)])
+            ears.move(to: pt(96, 56))
+            ears.addLines([pt(96, 56), pt(103, 65), pt(96, 74)])
+            ctx.stroke(ears, with: .color(.white), style: line)
+            for x in [55.0, 73.0] {
+                ctx.fill(Path(roundedRect: CGRect(x: (x - 3.5) * u, y: 56 * u, width: 7 * u, height: 18 * u), cornerRadius: 3.5 * u),
+                         with: .color(.white))
+            }
+        }
+        .frame(width: body_, height: body_)
+    }
+
+    /// Copilot's pilot in white line art, for Macs without VS Code: two
+    /// goggles over a rounded face with two eyes. Drawn on a 128-point grid.
+    private var copilotMark: some View {
+        Canvas { ctx, size in
+            let u = size.width / 128
+            let line = StrokeStyle(lineWidth: 7 * u, lineCap: .round, lineJoin: .round)
+            for x in [33.0, 65.0] {
+                ctx.stroke(Path(roundedRect: CGRect(x: x * u, y: 34 * u, width: 30 * u, height: 24 * u),
+                                cornerRadius: 11 * u, style: .continuous), with: .color(.white), style: line)
+            }
+            var face = Path()
+            face.move(to: CGPoint(x: 30 * u, y: 62 * u))
+            face.addLine(to: CGPoint(x: 30 * u, y: 80 * u))
+            face.addQuadCurve(to: CGPoint(x: 98 * u, y: 80 * u), control: CGPoint(x: 64 * u, y: 104 * u))
+            face.addLine(to: CGPoint(x: 98 * u, y: 62 * u))
+            face.move(to: CGPoint(x: 30 * u, y: 66 * u))
+            face.addQuadCurve(to: CGPoint(x: 22 * u, y: 76 * u), control: CGPoint(x: 22 * u, y: 66 * u))
+            face.move(to: CGPoint(x: 98 * u, y: 66 * u))
+            face.addQuadCurve(to: CGPoint(x: 106 * u, y: 76 * u), control: CGPoint(x: 106 * u, y: 66 * u))
+            ctx.stroke(face, with: .color(.white), style: line)
+            for x in [55.0, 73.0] {
+                ctx.fill(Path(roundedRect: CGRect(x: (x - 3.5) * u, y: 68 * u, width: 7 * u, height: 14 * u), cornerRadius: 3.5 * u),
+                         with: .color(.white))
+            }
+        }
+        .frame(width: body_, height: body_)
     }
 }
 

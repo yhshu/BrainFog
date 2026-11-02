@@ -207,7 +207,8 @@ struct GlobalSyncCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             FlowLayout(spacing: 6) {
-                ForEach(report.targets) { SyncChip(target: $0) }
+                // Agents that aren't installed take no part, so they aren't listed.
+                ForEach(report.targets.filter { $0.state != .notInstalled }) { SyncChip(target: $0) }
             }
         }
         .modifier(CardChrome())
@@ -216,7 +217,7 @@ struct GlobalSyncCard: View {
     private var summary: String {
         guard let source = report.source else { return "not shared" }
         let synced = report.targets.filter { $0.state == .synced || $0.state == .source }.count
-        let total = report.targets.filter { $0.state != .unsupported }.count
+        let total = report.targets.filter { $0.state != .unsupported && $0.state != .notInstalled }.count
         return "from \(displayPath(source)) · \(synced) of \(total) agents in step"
     }
 
@@ -257,7 +258,7 @@ private struct SyncChip: View {
         case .synced: "checkmark.circle.fill"
         case .drifted: "exclamationmark.triangle.fill"
         case .separate: "circle"
-        case .missing: "circle.dashed"
+        case .missing, .notInstalled: "circle.dashed"
         case .unsupported: "minus.circle"
         }
     }
@@ -278,6 +279,7 @@ private struct SyncChip: View {
         case .drifted: "\(file) no longer matches the source"
         case .separate: "\(file) has its own text"
         case .missing: "No \(file) yet"
+        case .notInstalled: "Not installed here"
         case .unsupported: "Keeps global rules in its settings, not in a file"
         }
     }

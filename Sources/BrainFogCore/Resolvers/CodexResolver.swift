@@ -33,10 +33,11 @@ public struct CodexResolver: ContextResolver {
             for name in names {
                 let url = dir.appendingPathComponent(name)
                 guard FileSupport.isFile(url), let text = FileSupport.read(url) else { continue }
-                // Codex passes over an empty file; list it so it can still be opened.
+                // Codex picks the first name that exists, then drops it if
+                // empty, so an empty override leaves the folder with nothing.
                 if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    list.add(url, scope: .project, timing: .skipped("empty file"))
-                    continue
+                    list.add(url, scope: .project, timing: .skipped("empty file, and it hides the rest of this folder"))
+                    break
                 }
                 let note = dir.path == cwd.path ? nil : "parent directory"
                 if budget <= 0 {

@@ -1,6 +1,6 @@
 # BrainFog
 
-A native macOS app for seeing and managing the layered memory and context of AI coding agents: Claude Code, Codex, OpenCode, Cursor, Gemini CLI, GitHub Copilot, Devin Desktop (formerly Windsurf), and Cline.
+A native macOS app for seeing and managing the layered memory and context of AI coding agents: Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, OpenCode, Cline, and Devin Desktop (formerly Windsurf).
 
 Its core is the **Context Lens**: pick any folder, and BrainFog applies each agent's real loading rules to show which files it reads at launch, in what order, how many tokens each takes, and which files are shadowed, cut off, or loaded on demand. It also lists each agent's MCP servers and can copy one to another agent. It shows which agents read the shared AGENTS.md and fixes the ones that don't, keeps one set of global instructions in step across agents, flags health problems, and keeps every version of the files it sees, with a timeline of what changed. Projects can be moved as `.agentpack` files, with credentials taken out. Every change it makes is shown as a diff first, except switching an MCP server off, which happens at once and stays in History. See [docs/DESIGN.md](docs/DESIGN.md) for the design and roadmap.
 

@@ -26,6 +26,13 @@ final class Sandbox {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Gives every agent its home folder, so each counts as installed.
+    func installAll() throws {
+        for dir in [".claude", ".codex", ".cursor", ".copilot", ".gemini", ".config/opencode", ".cline", ".config/devin"] {
+            try FileManager.default.createDirectory(at: home.appendingPathComponent(dir), withIntermediateDirectories: true)
+        }
+    }
+
     func env(_ vars: [String: String] = [:]) -> ResolverEnvironment {
         ResolverEnvironment(home: home, variables: vars,
                             claudeManagedDirectory: root.appendingPathComponent("managed"))
@@ -341,5 +348,60 @@ final class Sandbox {
         let ctx = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
         #expect(s.names(ctx).contains("~/code/app/.claude/rules/style.md"))
         #expect(throws: (any Error).self) { try rule.create(name: "style") }
+    }
+}
+
+/// Fixes from checking the resolvers against the agents' docs and source, 2026-11.
+@Suite struct DocsRecheckTests {
+    @Test func openCodeReadsEveryAgentsUpToTheRootAndItBeatsACloserClaude() throws {
+        let s = try Sandbox()
+        let sub = s.project.appendingPathComponent("pkg")
+        try s.write("AGENTS.md", "root", in: s.project)
+        try s.write("CLAUDE.md", "sub claude", in: sub)
+        try s.write("AGENTS.md", "sub agents", in: sub.appendingPathComponent("deeper"))
+        let ctx = OpenCodeResolver().resolve(workingDirectory: sub, environment: s.env())
+        #expect(s.names(ctx) == ["~/code/app/AGENTS.md"])
+        #expect(ctx.entries.contains { $0.url.lastPathComponent == "CLAUDE.md" && !$0.timing.isLoadedAtLaunch })
+
+        let deeper = OpenCodeResolver().resolve(workingDirectory: sub.appendingPathComponent("deeper"), environment: s.env())
+        #expect(s.names(deeper) == ["~/code/app/pkg/deeper/AGENTS.md", "~/code/app/AGENTS.md"])
+
+        // Without any AGENTS.md, the closer CLAUDE.md is read, unless the
+        // Claude prompt fallback is off.
+        try FileManager.default.removeItem(at: s.project.appendingPathComponent("AGENTS.md"))
+        #expect(s.names(OpenCodeResolver().resolve(workingDirectory: sub, environment: s.env())) == ["~/code/app/pkg/CLAUDE.md"])
+        let off = OpenCodeResolver().resolve(workingDirectory: sub, environment: s.env(["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1"]))
+        #expect(s.names(off).isEmpty)
+    }
+
+    @Test func openCodeSkillsLeaveOutClaudeFoldersWhenTurnedOff() throws {
+        let s = try Sandbox()
+        try s.write(".claude/skills/a/SKILL.md", "---\nname: a\ndescription: d\n---\n")
+        try s.write(".opencode/skills/b/SKILL.md", "---\nname: b\ndescription: d\n---\n", in: s.project)
+        let on = SkillResolver.resolve(agent: .openCode, workingDirectory: s.project, environment: s.env())
+        #expect(Set(on.map(\.name)) == ["a", "b"])
+        let off = SkillResolver.resolve(agent: .openCode, workingDirectory: s.project,
+                                        environment: s.env(["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1"]))
+        #expect(off.map(\.name) == ["b"])
+    }
+
+    @Test func codexEmptyOverrideHidesTheFoldersAgents() throws {
+        let s = try Sandbox()
+        try s.write("AGENTS.override.md", "\n", in: s.project)
+        try s.write("AGENTS.md", "rules", in: s.project)
+        let ctx = CodexResolver().resolve(workingDirectory: s.project, environment: s.env())
+        #expect(s.names(ctx).isEmpty)
+    }
+
+    @Test func claudeReadsASubfoldersAgentsOnlyWithoutItsOwnClaude() throws {
+        let s = try Sandbox()
+        try s.write("CLAUDE.md", "root", in: s.project)
+        try s.write("api/AGENTS.md", "api", in: s.project)
+        try s.write("web/AGENTS.md", "web", in: s.project)
+        try s.write("web/CLAUDE.md", "web claude", in: s.project)
+        let ctx = ClaudeCodeResolver().resolve(workingDirectory: s.project, environment: s.env())
+        let onDemand = ctx.entries.filter { if case .onDemand = $0.timing { true } else { false } }
+            .map { $0.url.path.replacingOccurrences(of: s.project.path + "/", with: "") }
+        #expect(onDemand.sorted() == ["api/AGENTS.md", "web/CLAUDE.md"])
     }
 }

@@ -233,7 +233,7 @@ public struct ChangeSet: Identifiable, Sendable, Hashable {
         } catch {
             for edit in written.reversed() {
                 if let before = edit.before {
-                    try? before.write(to: edit.url, atomically: true, encoding: .utf8)
+                    try? before.write(to: edit.url.resolvingSymlinksInPath(), atomically: true, encoding: .utf8)
                 } else {
                     try? fm.removeItem(at: edit.url)
                 }

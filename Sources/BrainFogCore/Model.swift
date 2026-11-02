@@ -1,14 +1,17 @@
 import Foundation
 
+/// Listed in the order the app shows them: roughly how widely each is used
+/// with instruction files, Claude Code first since the others follow its
+/// CLAUDE.md and AGENTS.md conventions.
 public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
     case claudeCode
     case codex
-    case openCode
     case cursor
-    case geminiCLI
     case copilot
-    case devin
+    case geminiCLI
+    case openCode
     case cline
+    case devin
 
     public var id: String { rawValue }
 
@@ -23,6 +26,40 @@ public enum AgentID: String, CaseIterable, Codable, Sendable, Identifiable {
         case .devin: "Devin Desktop"
         case .cline: "Cline"
         }
+    }
+}
+
+extension AgentID {
+    /// Whether the agent has been used on this Mac: it keeps a folder in the
+    /// home folder, or, for the ones that live in VS Code or Cursor, storage
+    /// for its extension.
+    public func isInstalled(environment env: ResolverEnvironment = .init()) -> Bool {
+        func dir(_ variable: String, _ path: String) -> String {
+            env.variables[variable].map { FileSupport.expandTilde($0, home: env.home) }
+                ?? env.home.appendingPathComponent(path).path
+        }
+        let editors = ["Code", "Code - Insiders", "Cursor"].map {
+            env.home.appendingPathComponent("Library/Application Support/\($0)/User/globalStorage").path + "/"
+        }
+        let paths: [String] = switch self {
+        case .claudeCode: [env.home.appendingPathComponent(".claude").path]
+        case .codex: [dir("CODEX_HOME", ".codex")]
+        case .cursor: [env.home.appendingPathComponent(".cursor").path]
+        case .copilot: [dir("COPILOT_HOME", ".copilot")] + editors.prefix(2).map { $0 + "github.copilot-chat" }
+        case .geminiCLI: [GeminiResolver.home(env).appendingPathComponent(".gemini").path]
+        case .openCode: [dir("XDG_CONFIG_HOME", ".config") + "/opencode",
+                         env.home.appendingPathComponent(".local/share/opencode").path]
+        case .cline: [env.home.appendingPathComponent(".cline").path,
+                      env.home.appendingPathComponent("Documents/Cline").path] + editors.map { $0 + "saoudrizwan.claude-dev" }
+        case .devin: [".config/devin", ".devin", ".codeium/windsurf"].map { env.home.appendingPathComponent($0).path }
+        }
+        return paths.contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Every agent, the installed ones first, each group in `allCases` order.
+    public static func ordered(environment env: ResolverEnvironment = .init()) -> [AgentID] {
+        let installed = allCases.filter { $0.isInstalled(environment: env) }
+        return installed + allCases.filter { !installed.contains($0) }
     }
 }
 
@@ -185,8 +222,8 @@ public protocol ContextResolver: Sendable {
 
 public enum Resolvers {
     public static let all: [any ContextResolver] = [
-        ClaudeCodeResolver(), CodexResolver(), OpenCodeResolver(), CursorResolver(),
-        GeminiResolver(), CopilotResolver(), DevinResolver(), ClineResolver(),
+        ClaudeCodeResolver(), CodexResolver(), CursorResolver(), CopilotResolver(),
+        GeminiResolver(), OpenCodeResolver(), ClineResolver(), DevinResolver(),
     ]
 
     public static func resolveAll(workingDirectory: URL,

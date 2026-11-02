@@ -26,7 +26,8 @@ public struct GeminiResolver: ContextResolver {
         for name in names {
             add(geminiHome.appendingPathComponent(name), .user, note: name == "GEMINI.md" ? "global notes the agent saves go here" : nil)
         }
-        let memory = Self.privateMemoryDirectory(for: boundary ?? cwd, geminiHome: geminiHome)
+        // Keyed by the folder Gemini was started in, not the repository root.
+        let memory = Self.privateMemoryDirectory(for: cwd, geminiHome: geminiHome)
         let index = memory.appendingPathComponent("MEMORY.md")
         if FileSupport.isFile(index) {
             add(index, .autoMemory, note: "private notes for this project")
@@ -93,7 +94,8 @@ public struct GeminiResolver: ContextResolver {
         }
         let derived = root.lastPathComponent.lowercased()
             .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
-        return geminiHome.appendingPathComponent("tmp/\(slug ?? derived)/memory")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return geminiHome.appendingPathComponent("tmp/\(slug ?? (derived.isEmpty ? "project" : derived))/memory")
     }
 
     private func addImports(of file: URL, text: String, timing: LoadTiming, depth: Int, root: URL,

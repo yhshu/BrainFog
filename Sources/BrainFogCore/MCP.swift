@@ -476,6 +476,8 @@ public enum MCPEdit {
             for (k, v) in MCPCopy.shape(new, for: old.agent, format: format) {
                 entry[k] = MCPCopy.keepingRaw(v, old: original[k])
             }
+            // The form doesn't edit Copilot's tool list, so a narrowed one stays.
+            if let tools = original["tools"] { entry["tools"] = tools }
             let merged: String?
             if old.name == new.name {
                 merged = JSONC.setting(member: old.name, value: entry, at: [key], in: text)

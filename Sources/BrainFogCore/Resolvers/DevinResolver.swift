@@ -115,7 +115,7 @@ public struct DevinResolver: ContextResolver {
         var timing: LoadTiming = switch Frontmatter.scalar("trigger", in: yaml) ?? "manual" {
         case "always_on": .launch
         case "glob": .onDemand("when files matching \(globs.isEmpty ? "its globs" : globs.joined(separator: ", ")) are touched")
-        case "model_decision": .onDemand("when Devin judges it relevant: \(Frontmatter.scalar("description", in: yaml) ?? "no description")")
+        case "model_decision", "agent": .onDemand("when Devin judges it relevant: \(Frontmatter.scalar("description", in: yaml) ?? "no description")")
         default: .onDemand("only when invoked by name")
         }
         if let nested, timing.isLoadedAtLaunch { timing = .onDemand("when Devin works on files in \(nested)/") }

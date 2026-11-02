@@ -265,6 +265,8 @@ struct AgentSection: View {
         case .timeline: false
         }
     }
+    /// Not installed and nothing here: just the header, saying so.
+    private var isAbsent: Bool { !hasItems && !model.installed.contains(context.agent) }
     private var isCollapsed: Bool { query.isEmpty && hasItems && collapsedAgents.split(separator: ",").contains(Substring(context.agent.rawValue)) }
 
     private func toggleCollapsed() {
@@ -299,7 +301,9 @@ struct AgentSection: View {
                                 .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                                 .rotationEffect(.degrees(isCollapsed ? 0 : 90))
                         }
-                        if isCollapsed {
+                        if isAbsent {
+                            Text("not found on this Mac").font(.subheadline).foregroundStyle(.tertiary)
+                        } else if isCollapsed {
                             Text(summary).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
                         }
                         Spacer(minLength: 0)
@@ -316,7 +320,7 @@ struct AgentSection: View {
                     addMenu
                 }
             }
-            if !isCollapsed {
+            if !isCollapsed && !isAbsent {
                 switch mode {
                 case .context: contextGroups
                 case .skills: skillGroups

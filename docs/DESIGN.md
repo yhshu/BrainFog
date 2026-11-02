@@ -1,26 +1,21 @@
-# BrainFog Design Document
+# BrainFog Design
 
-> A native macOS app for seeing, managing, and migrating the layered memory and context of AI coding agents (Claude Code / Codex / OpenCode / Cursor / Gemini CLI / GitHub Copilot / Devin Desktop / Cline).
+A native macOS app that shows what each AI coding agent (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, OpenCode, Cline, Devin Desktop) actually loads into its context, and lets you edit, share and move those files safely.
 
-## 1. The problem
+## 1. Purpose
 
-Every agent has its own set of "memory": human-written instruction files (CLAUDE.md / AGENTS.md), memory the agent writes itself (Claude auto memory, Codex memories), rules, skills, and MCP connectors. These are layered **global → project → directory**, and the rules differ across all three agents. Existing tools (see §7) are all readers that "list files per agent"; they cannot answer the real question:
+Every agent layers its own instruction files, rules, memory, skills and MCP servers (global → project → directory), each by different rules. BrainFog answers one question: **started in this folder, what does this agent read, in what order, at what token cost, and what is shadowed, cut off or ignored?** Everything else (editing, copying between agents, keeping one shared AGENTS.md or global file, health checks, history, `.agentpack` export) serves that view.
 
-> **When I launch a given agent in this directory, what exactly does it see? In what order? How many tokens does it take? Where do things conflict?**
+## 2. Principles
 
-## 2. Core differentiators
+- **Resolvers are pure**: (cwd, home, environment, filesystem) → `ResolvedContext`, unit-tested in temporary folders. Rules that aren't documented are labelled as inferred.
+- **Write little, show first**: BrainFog writes only what the user asks for. Every change is shown as a diff, checked against the file's current content, applied all or nothing, and kept in History. The one exception is switching an MCP server off, which only takes something away. Codex's memory database is read-only.
+- **Nothing for agents that aren't installed**: they sort last, show as a single line, and syncing skips them.
+- **Unsaved edits are never dropped silently**; a file deleted elsewhere stays open so it can be saved back.
+- **Tests never touch the user's files**: `ResolverEnvironment` takes a temporary home, and `BRAINFOG_HOME` points the whole app at one.
+- **Agent order**: installed agents first, then roughly by how widely each is used with instruction files (Claude Code, Codex, Cursor, Copilot, Gemini CLI, OpenCode, Cline, Devin).
 
-| # | Capability | Description |
-|---|---|---|
-| 1 | **Context Lens (effective-context resolver)** | Pick any directory and simulate loading according to each agent's real rules: files, order, at startup vs. on demand, tokens, truncation, and shadowing (e.g. Claude does not read AGENTS.md when CLAUDE.md exists). |
-| 2 | **Layered browsing and editing** | An agent × layer matrix (managed / user / project / local / directory / auto memory / rules), with in-place editing, detection of external modifications, and conflict warnings. |
-| 3 | **`.agentpack` import/export** | Bundles memory, instructions, rules, skills, and MCP configuration; secrets are stripped automatically on export; before import, a per-file diff preview is shown and paths are remapped for the target agent. |
-| 4 | **Timeline and rollback** | Watches (FSEvents) agent writes and takes content-addressed snapshots automatically; "what did Claude record about this project yesterday", with one-click rollback. |
-| 5 | **Health checks** (across all of the above) | Credentials in instruction files and in project MCP configs, empty files read every session, starting context over 20k tokens, personal files missing from .gitignore, MCP configs that can't be parsed, instruction files that link to nowhere, and global copies that drifted from their source. Truncation (MEMORY.md's 200 lines/25KB, Codex's 32 KiB) and missing `@import` targets are shown on the file in the Context Lens. |
-
-Future directions: compiling a single source to multiple formats (CLAUDE.md ⇄ AGENTS.md ⇄ OpenCode instructions), cross-machine sync.
-
-## 3. Per-agent loading rules (basis for the resolvers; checked against official docs, 2026-10)
+## 3. Per-agent loading rules (checked against official docs, 2026-11)
 
 ### Claude Code (default `claude-md-or-agents-md` mode)
 1. Managed: `/Library/Application Support/ClaudeCode/CLAUDE.md` (loaded first; cannot be excluded).
@@ -28,7 +23,7 @@ Future directions: compiling a single source to multiple formats (CLAUDE.md ⇄ 
 3. Ancestor directories: from the filesystem root down to cwd, at each level `CLAUDE.md`, `.claude/CLAUDE.md`, then `CLAUDE.local.md` (within a level, local comes last). Everything is concatenated; closer files come later.
 4. If cwd and its ancestors contain **no** `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md` at all, then `AGENTS.md` and `.claude/AGENTS.md` are read at each level instead (v2.1.277+). User / managed / rules do not take part in this check.
 5. `.claude/rules/**/*.md`: files without `paths` frontmatter load at startup; files with `paths` load on demand when a matching file is read or written.
-6. CLAUDE.md in subdirectories: on demand (when Claude reads or writes files in that subdirectory).
+6. CLAUDE.md in subdirectories: on demand (when Claude reads or writes files in that subdirectory). A subdirectory's AGENTS.md loads the same way when that folder has no CLAUDE.md, `.claude/CLAUDE.md` or `CLAUDE.local.md`.
 7. `@path` imports: resolved relative to the containing file, at most 4 hops.
 8. Auto memory: `~/.claude/projects/<encoded git root path>/memory/MEMORY.md`; at startup only the first 200 lines or 25KB are loaded; topic files are read on demand. `autoMemoryDirectory` changes the location, and `autoMemoryEnabled` turns it off. Encoding: characters in the path other than `[A-Za-z0-9-]` are replaced with `-`.
 9. `claudeMdExcludes`: excludes by absolute-path glob (except managed).
@@ -36,16 +31,16 @@ Future directions: compiling a single source to multiple formats (CLAUDE.md ⇄ 
 
 ### Codex
 1. Under `CODEX_HOME` (default `~/.codex`), `AGENTS.override.md`, otherwise `AGENTS.md`; the first non-empty one is used.
-2. Walk from the project root (usually the git root; if none is found, only cwd is considered) down to cwd, checking `AGENTS.override.md`, `AGENTS.md`, then `project_doc_fallback_filenames` at each level, taking at most one file per level.
+2. Walk from the project root (usually the git root; if none is found, only cwd is considered) down to cwd, checking `AGENTS.override.md`, `AGENTS.md`, then `project_doc_fallback_filenames` at each level. The first name that exists is the level's file; if it is empty the level contributes nothing.
 3. Concatenated with the root first and cwd last; empty files are skipped; loading stops once the total reaches `project_doc_max_bytes` (default 32 KiB).
 4. Memories: generated state, stored in `~/.codex/memories/`; intermediate pipeline data lives in `~/.codex/memories_1.sqlite` (`stage1_outputs` holds per-thread raw memories). **BrainFog treats this database as read-only**: it belongs to Codex, and the official docs advise against editing it by hand.
 
 ### OpenCode
-1. Search upward from cwd for `AGENTS.md`; if a level has none, look for `CLAUDE.md`; the first match is the project rules.
+From the docs and source (`session/instruction.ts`).
+1. Project: try `AGENTS.md`, then `CLAUDE.md`, then the deprecated `CONTEXT.md`, each from cwd up to the git root. The first name found anywhere wins, and every copy of it loads, closest first, so a parent's AGENTS.md beats a closer CLAUDE.md.
 2. Global: `~/.config/opencode/AGENTS.md`; if it does not exist, fall back to `~/.claude/CLAUDE.md`.
-3. `OPENCODE_DISABLE_CLAUDE_CODE=1` disables all `.claude` fallbacks; `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` disables only `~/.claude/CLAUDE.md`.
+3. `OPENCODE_DISABLE_CLAUDE_CODE` turns off every `.claude` fallback (files and skills); `..._PROMPT` turns off CLAUDE.md, global and project; `..._SKILLS` turns off `.claude/skills`; `OPENCODE_DISABLE_PROJECT_CONFIG` turns off project rules.
 4. `instructions` in `opencode.json(c)`: paths, globs, and remote URLs, merged with AGENTS.md.
-5. The official docs do not say whether multiple parent directory levels are all loaded, or in what merge order. The resolver implements "first match" and marks this as inferred in the UI.
 
 ### Cursor (closed source; from cursor.com/docs, 2026-10)
 1. The workspace is the folder Cursor opened; there is no walk up to parent directories.
@@ -58,7 +53,7 @@ Future directions: compiling a single source to multiple formats (CLAUDE.md ⇄ 
 
 ### Gemini CLI (open source; from source at v0.67, 2026-10)
 1. File names: `GEMINI.md`, plus any names in `context.fileName`, which are added in front of it rather than replacing it. Every name is checked at every location. `GEMINI_CLI_HOME` replaces home.
-2. Global: `~/.gemini/<names>`. Private project memory: `~/.gemini/tmp/<slug>/memory/MEMORY.md`, falling back to `<names>` in that directory. The slug comes from `~/.gemini/projects.json`, or else from the root folder's name.
+2. Global: `~/.gemini/<names>`. Private project memory: `~/.gemini/tmp/<slug>/memory/MEMORY.md`, falling back to `<names>` in that directory. The slug is for the folder Gemini started in (not the repo root): from `~/.gemini/projects.json`, or else that folder's name.
 3. Project: walk up from cwd to the nearest `context.memoryBoundaryMarkers` folder (default `.git`). With no marker, only cwd is checked. Paths are sorted as strings.
 4. No downward scan at launch. Files below cwd load just in time, when a tool reads or edits a path there.
 5. `@path` imports, at most 5 levels deep, and they must stay inside the project root. Extensions add `contextFileName` from `gemini-extension.json`.
@@ -75,7 +70,7 @@ Future directions: compiling a single source to multiple formats (CLAUDE.md ⇄ 
 ### Devin Desktop (formerly Windsurf; Devin Local agent, from docs.devin.ai)
 Windsurf was renamed Devin Desktop on 2026-06-02. Cascade can no longer start conversations, so only Devin Local is modelled.
 1. Global: `~/.config/devin/AGENTS.md` (or `AGENT.md`), `~/.claude/CLAUDE.md`, `~/.devin/global_rules.md`, `~/.devin/rules/*.md`.
-2. From the workspace root to cwd, these are always on: `AGENTS.md`, `AGENTS.local.md`, `AGENT.md`, `.windsurfrules`, `CLAUDE.md`. Also `.devin/global_rules.md` (wins over `.windsurf/global_rules.md`), plus `.devin/rules/*.md` and `.windsurf/rules/*.md`, whose `trigger` is `always_on|glob|model_decision|manual`.
+2. From the workspace root to cwd, these are always on: `AGENTS.md`, `AGENTS.local.md`, `AGENT.md`, `.windsurfrules`, `CLAUDE.md`. Also `.devin/global_rules.md` (wins over `.windsurf/global_rules.md`), plus `.devin/rules/*.md` and `.windsurf/rules/*.md`, whose `trigger` is `always_on|glob|model_decision|agent|manual` (`agent` is treated like `model_decision`).
 3. Cursor rules (`.cursor/rules/*.md|mdc`) are read with Cursor's frontmatter. `read_config_from` in `~/.config/devin/config.json` or `.devin/config.json` turns the claude, cursor, windsurf and agents_standard imports off.
 4. Subdirectory copies load lazily. No size limits are documented.
 5. MCP: `~/.config/devin/mcp_config.json`, `.devin/mcp_config.json`, `.devin/mcp_config.local.json` (`mcpServers`; remote servers use `url` plus `transport`). Windsurf's `~/.codeium/windsurf/mcp_config.json` is imported.
@@ -85,65 +80,24 @@ Cline ships two engines in one extension and picks one per user, which can't be 
 1. Search order: `<root>/AGENTS.md`, `<root>/.clinerules` (a file, or a folder read non-recursively), `<root>/.cline/rules/`, `~/.agents/AGENTS.md`, `~/.cline/rules/`, `~/Cline/Rules`, `~/Documents/Cline/Rules`. Extensions are `.md`, `.markdown` and `.txt`.
 2. Rule name is frontmatter `name` or the file name. A later rule with the same name replaces an earlier one. `disabled: true` or `enabled: false` turns a rule off. Rules are sorted by name.
 3. `paths` is not evaluated by the SDK engine, so those rules are always on. The older engine honours `paths`, reads subfolders, and also reads `.cursorrules`, `.cursor/rules/*.mdc` and `.windsurfrules`.
-4. MCP: `~/.cline/data/settings/cline_mcp_settings.json` (`CLINE_DATA_DIR`, `CLINE_MCP_SETTINGS_PATH`). The older engine uses VS Code globalStorage `saoudrizwan.claude-dev`. A remote server without a `type` is SSE.
+4. Skills, winner first on a name clash: `~/.agents/skills`, `~/.cline/skills`, then at the workspace root only `.agents`, `.claude`, `.cline`, `.clinerules` skills folders.
+5. MCP: `~/.cline/data/settings/cline_mcp_settings.json` (`CLINE_DATA_DIR`, `CLINE_MCP_SETTINGS_PATH`). The older engine uses VS Code globalStorage `saoudrizwan.claude-dev`. A remote server without a `type` is SSE.
 
-## 4. Architecture
+## 4. Code layout
 
-```
-BrainFog (SwiftUI app, macOS 26+)
- ├─ BrainFogCore (pure Foundation, testable, no UI)
- │   ├─ Model        AgentID / Scope / ContextEntry / ResolvedContext / Diagnostic
- │   ├─ Resolvers    one per agent: Claude Code, Codex, OpenCode, Cursor, Gemini CLI, Copilot, Devin, Cline
- │   ├─ Support      import parsing, frontmatter, glob, token estimation, path encoding, JSONC
- │   ├─ Stores       CodexMemoryStore (SQLite, read-only)
- │   ├─ Skills       skill discovery per agent and layer
- │   ├─ Creating     the new instruction and rule files each agent can have here
- │   ├─ Copying      copies a file to another agent, converting its rule format and scope
- │   ├─ MCP          per-agent server discovery, approval state; add, edit, remove, switch, copy (JSON/JSONC edits keep comments and line endings, Codex TOML tables)
- │   ├─ Sharing      who reads AGENTS.md, import fixes, moving CLAUDE.md into AGENTS.md
- │   ├─ GlobalSync   one source for global instructions, marked copies, drift
- │   ├─ Health       see §2; fixes are ChangeSets where there is an obvious one
- │   ├─ RuleFormat   frontmatter forms per rule kind
- │   ├─ History      content-addressed versions of every file seen or written; ChangeSet/FileEdit with a conflict check, applied all or nothing, writing through symlinks
- │   ├─ Pack         .agentpack read/write, secret stripping (env, headers, arguments, URL queries), import as a ChangeSet
- │   └─ ProjectDiscovery  projects Claude Code and Codex already know
- └─ App              sidebar, Context Lens, Skills, MCP Servers, Timeline, editor; FSEvents watching
-```
+- `BrainFogCore` (Foundation only, tested): `Model`, one resolver per agent under `Resolvers/`, `Skills`, `MCP` (discovery and comment-preserving edits of JSON/JSONC/TOML), `Creating`, `Copying`, `Sharing` (AGENTS.md), `GlobalSync`, `Health`, `RuleFormat`, `History` (content-addressed versions, `ChangeSet`), `Pack`, `ProjectDiscovery`.
+- `BrainFog` (SwiftUI, macOS 26+): sidebar, the lens with four modes (Instructions & Memory, Skills, MCP Servers, Timeline), editor, change preview; FSEvents watching.
 
-Principles:
-- **Resolvers are pure functions**: input (cwd, home, environment variables, filesystem) → output `ResolvedContext`; unit-tested with temporary directories.
-- **Minimal intrusion into agent data**: only write files the user explicitly edits; compare mtime/content before writing and warn on conflict; every write is snapshotted to the timeline first.
-- **Every change is previewed as a diff**, except switching an MCP server off, which only takes something away; it happens at once and stays in History. Turning a server on, or approving a Claude project server, is previewed because it lets a command run.
-- **Unsaved edits are never dropped silently**: anything that would close or replace the editor asks first, and a file deleted elsewhere stays open so it can be saved back.
-- **Uncertain rules are explicitly labeled**; no pretending to be exact.
-- **Testing never touches the user's files**: tests use a temporary home through `ResolverEnvironment`, and `BRAINFOG_HOME` points the whole app at a throwaway home folder.
+## 5. Interface
 
-## 5. Design language
+Follows the macOS HIG: Liquid Glass only on system controls (toolbar, sidebar); content on plain grouped cards with concentric rows. Each agent has a stable colour, and uses its own installed app icon where there is one. Paths in a project are shown relative to it. Shortcuts: ⌘S save, ⌘R reload, Esc close the editor, ⇧⌘I / ⇧⌘E import and export a pack.
 
-- Follows the macOS Human Interface Guidelines. Liquid Glass is left to the system's own controls and navigation (toolbar, sidebar); content sits on plain grouped cards (`CardChrome`), with rows that round concentrically inside them and show only a hover or selection fill. Light and dark appearance both come from system colors.
-- Toolbar controls are system toolbar items, so they share one size and capsule. The header of the agent being read is pinned in a bar under the toolbar, inside the toolbar's scroll edge effect.
-- On a project page, paths inside the project are shown relative to it.
-- Each agent has a stable identifying color, applied to its icon, token bar and selected rows.
-- Keyboard first: ⌘S save, ⌘R reload files, Esc close the editor, ⇧⌘I / ⇧⌘E import and export an agent pack.
+## 6. Next
 
-## 6. Milestones
+- Signing, notarization and updates.
+- Re-check each resolver against the agents' docs as they change (last full check: 2026-11). Known gaps from that check: Codex `project_root_markers` and untrusted projects; OpenCode's per-file nested AGENTS.md and `instructions` globbed from cwd up; Claude Code subfolder `.claude/rules`; Copilot `.mcp.json` in every folder up to the repo root; MCP servers Devin imports from other tools.
+- Maybe: compiling one source into each agent's format; sync across machines.
 
-| Phase | Scope |
-|---|---|
-| MVP-0 | Project skeleton, resolvers + tests, first UI for Context Lens and global/project browsing and editing |
-| MVP-1 | Gemini CLI, Copilot, Devin, Cline; MCP view and copy; shared AGENTS.md fixes; health checks; frontmatter forms; history with restore; changes previewed as a diff (done) |
-| MVP-2 | `.agentpack` format, secret stripping, import diff preview; skills and MCP connectors included (done: one JSON file; File → Import/Export Agent Pack) |
-| MVP-3 | Timeline view across files, with undo; FSEvents watching instead of snapshots on refresh (done) |
-| 0.1.0 preview | Single-source global instructions with drift detection (done: Claude imports the source, other agents get marked copies); edge-case tests for every create/read/update/delete path (done) |
-| Next | Signing, notarization and updates; checking each resolver against the agents' current docs |
+## License
 
-## 7. Competitors and references (research only; no code reused)
-
-- nvwalj/ai-memory-reader (GPL-3.0): cross-agent reading/editing, no layer resolution, no OpenCode.
-- markes76/claude-code-gui: edits Claude Code's four CLAUDE.md layers, Electron, Claude Code only.
-- bonnguyenitc/claude-memory-app, macmade/Memories: Claude Code memory only.
-- Ameer-Jamal/agent-memory, manuelschipper/mdmanager: cross-tool sharing/sync, mainly CLI.
-
-## 8. License
-
-PolyForm Noncommercial 1.0.0: source-available, permits noncommercial use and modification, prohibits commercial use. Note that it is not an "open source" license as defined by the OSI.
+PolyForm Noncommercial 1.0.0 (source-available, not OSI open source).

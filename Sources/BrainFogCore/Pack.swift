@@ -35,6 +35,8 @@ public struct AgentPack: Codable, Sendable, Equatable {
         public var url: String?
         public var transport: String?
         public var headers: [String: String]
+        /// Missing in packs made before it was recorded, meaning on.
+        public var enabled: Bool?
     }
 
     public var format = 1
@@ -101,7 +103,8 @@ public struct AgentPack: Codable, Sendable, Equatable {
         var packed: [Server] = []
         for server in servers where place(server.file) != nil {
             var out = Server(agent: server.agent, name: server.name, command: server.command, args: server.args,
-                             env: server.env, url: server.url, transport: server.transport, headers: server.headers)
+                             env: server.env, url: server.url, transport: server.transport, headers: server.headers,
+                             enabled: server.enabled ? nil : false)
             // A credential becomes a reference to an environment variable of
             // the same name, which the receiving machine sets itself.
             for key in server.secretKeys {
@@ -178,7 +181,15 @@ public struct AgentPack: Codable, Sendable, Equatable {
             server.headers = packed.headers
             let current = texts[location.file] ?? FileSupport.read(location.file)
             do {
-                texts[location.file] = try MCPEdit.inserting(server, for: packed.agent, at: location, into: current)
+                var text = try MCPEdit.inserting(server, for: packed.agent, at: location, into: current)
+                // A server that was off stays off, where the agent keeps that in
+                // the same file. (A Claude project server waits for approval anyway.)
+                server.format = location.format
+                server.editable = true
+                if packed.enabled == false, server.switchKind != nil, server.switchKind != .claudeSettings {
+                    text = try MCPEdit.switching(server, on: false, sameFileText: text).after
+                }
+                texts[location.file] = text
             } catch MCPEdit.Failure.nameTaken {
                 notes.append("\(packed.agent.displayName) already has a server named “\(packed.name)”; it was left as is.")
             } catch {

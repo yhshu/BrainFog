@@ -19,6 +19,8 @@ public struct GlobalSyncReport: Sendable {
         case separate
         /// No file yet.
         case missing
+        /// No file, and the agent isn't installed here, so none is written.
+        case notInstalled
         /// Keeps global instructions outside files (Cursor's User Rules).
         case unsupported
     }
@@ -47,7 +49,7 @@ public struct GlobalSyncReport: Sendable {
     // MARK: Reading the current state
 
     public static func analyze(environment env: ResolverEnvironment = .init()) -> GlobalSyncReport {
-        let files = AgentID.allCases.map { ($0, globalFile(for: $0, env: env)) }
+        let files = AgentID.ordered(environment: env).map { ($0, globalFile(for: $0, env: env)) }
         // The source is whatever the copies name.
         let source = files.lazy.compactMap { _, file in file.flatMap(FileSupport.read).flatMap(marker(in:)) }
             .first.map { URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home)).standardizedFileURL }
@@ -56,7 +58,9 @@ public struct GlobalSyncReport: Sendable {
         let targets = files.map { agent, file -> Target in
             guard let file else { return Target(agent: agent, file: nil, state: .unsupported) }
             if file.standardizedFileURL == source { return Target(agent: agent, file: file, state: .source) }
-            guard let text = FileSupport.read(file) else { return Target(agent: agent, file: file, state: .missing) }
+            guard let text = FileSupport.read(file) else {
+                return Target(agent: agent, file: file, state: agent.isInstalled(environment: env) ? .missing : .notInstalled)
+            }
             if let source, links(file, to: source) { return Target(agent: agent, file: file, state: .synced) }
             if agent == .claudeCode, let source, lines(of: text).contains(importLine(source, env: env)) {
                 return Target(agent: agent, file: file, state: .synced)
@@ -71,7 +75,8 @@ public struct GlobalSyncReport: Sendable {
 
     /// Makes `source` the one set of global instructions: imports it into
     /// Claude Code's file and writes a marked copy for every other agent.
-    /// Agents whose file already matches are left alone.
+    /// Agents whose file already matches are left alone, and so are agents
+    /// not installed here, so syncing doesn't scatter folders for them.
     public func sync(from source: URL, environment env: ResolverEnvironment = .init()) -> ChangeSet? {
         let source = source.standardizedFileURL
         guard let text = FileSupport.read(source) else { return nil }
@@ -79,7 +84,8 @@ public struct GlobalSyncReport: Sendable {
         var edits: [FileEdit] = []
         var separate: [String] = []
         for target in targets {
-            guard let file = target.file, file.standardizedFileURL != source, !Self.links(file, to: source) else { continue }
+            guard let file = target.file, target.state != .notInstalled,
+                  file.standardizedFileURL != source, !Self.links(file, to: source) else { continue }
             let existing = FileSupport.read(file)
             if target.agent == .claudeCode {
                 let line = Self.importLine(source, env: env)

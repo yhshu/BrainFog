@@ -354,6 +354,7 @@ import Testing
     /// not replace it with a generated copy.
     @Test func targetSymlinkedToTheSourceIsLeftAlone() throws {
         let s = try Sandbox()
+        try s.installAll()
         let env = s.env()
         try s.write(".agents/AGENTS.md", "Shared rules\n")
         let source = s.home.appendingPathComponent(".agents/AGENTS.md")
@@ -368,6 +369,7 @@ import Testing
 
     @Test func manualEditOfACopyIsDriftAndTheFixRestoresIt() throws {
         let s = try Sandbox()
+        try s.installAll()
         let env = s.env()
         let h = s.history
         try s.write(".agents/AGENTS.md", "Be brief.\n")
@@ -395,8 +397,10 @@ import Testing
 
     @Test func syncHonoursCodexHome() throws {
         let s = try Sandbox()
+        try s.installAll()
         let env = s.env(["CODEX_HOME": "~/alt-codex"])
         try s.write(".agents/AGENTS.md", "Rules\n")
+        try s.write("alt-codex/config.toml", "")
         let source = s.home.appendingPathComponent(".agents/AGENTS.md")
         let change = try #require(GlobalSyncReport.analyze(environment: env).sync(from: source, environment: env))
         #expect(change.edits.contains { $0.url.path == s.home.appendingPathComponent("alt-codex/AGENTS.md").path })
@@ -406,6 +410,7 @@ import Testing
     /// "fixed by syncing again", but the fix is nil since the source is gone.
     @Test func driftIssuesAfterTheSourceIsDeletedStillOfferAFix() throws {
         let s = try Sandbox()
+        try s.installAll()
         let env = s.env()
         try s.write(".agents/AGENTS.md", "Rules\n")
         let source = s.home.appendingPathComponent(".agents/AGENTS.md")

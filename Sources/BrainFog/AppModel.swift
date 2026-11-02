@@ -26,10 +26,11 @@ enum Place: Hashable, Identifiable {
 @MainActor @Observable
 final class AppModel {
     var projects: [ProjectDiscovery.Project] = []
-    /// Projects the user hid from the sidebar; kept so they can be shown again.
-    var hiddenProjects: [ProjectDiscovery.Project] = []
     var selection: Place? = .global
+    /// One per agent, installed agents first.
     var contexts: [ResolvedContext] = []
+    /// Agents used on this Mac; the rest show as a single line until they have files.
+    var installed: Set<AgentID> = []
     /// MCP servers per agent for the selected place.
     var servers: [AgentID: [MCPServer]] = [:]
     /// Whether every agent reads the project's AGENTS.md; nil on the global page.
@@ -75,6 +76,7 @@ final class AppModel {
     }
 
     private let addedKey = "addedProjects"
+    /// Projects hidden by earlier versions, which now count as removed.
     private let hiddenKey = "hiddenProjects"
     private let removedKey = "removedProjects"
     private var resolveTask: Task<Void, Never>?
@@ -90,6 +92,11 @@ final class AppModel {
     }
 
     func reloadProjects() {
+        let defaults = UserDefaults.standard
+        if let hidden = defaults.stringArray(forKey: hiddenKey) {
+            defaults.set((defaults.stringArray(forKey: removedKey) ?? []) + hidden, forKey: removedKey)
+            defaults.removeObject(forKey: hiddenKey)
+        }
         var list = ProjectDiscovery.discover()
         let added = (UserDefaults.standard.stringArray(forKey: addedKey) ?? [])
             .map { URL(fileURLWithPath: $0) }
@@ -100,28 +107,13 @@ final class AppModel {
         }
         let removed = Set(UserDefaults.standard.stringArray(forKey: removedKey) ?? [])
         list.removeAll { removed.contains($0.url.path) }
-        let hidden = Set(UserDefaults.standard.stringArray(forKey: hiddenKey) ?? [])
-        projects = list.filter { !hidden.contains($0.url.path) }
-        hiddenProjects = list.filter { hidden.contains($0.url.path) }
+        projects = list
     }
 
     /// Runs `action`, which closes or replaces the editor, right away, or
     /// after the user confirms dropping unsaved edits.
     func whenEditsAreSafe(_ action: @escaping () -> Void) {
         if hasUnsavedEdits { pendingDiscard = action } else { action() }
-    }
-
-    func setHidden(_ url: URL, _ hide: Bool) {
-        if hide, selection == .project(url), hasUnsavedEdits {
-            whenEditsAreSafe { [self] in setHidden(url, hide) }
-            return
-        }
-        var hidden = UserDefaults.standard.stringArray(forKey: hiddenKey) ?? []
-        hidden.removeAll { $0 == url.path }
-        if hide { hidden.append(url.path) }
-        UserDefaults.standard.set(hidden, forKey: hiddenKey)
-        if hide, selection == .project(url) { selection = .global }
-        reloadProjects()
     }
 
     /// Drops a project from BrainFog without touching its files. Discovered
@@ -133,7 +125,6 @@ final class AppModel {
         }
         let defaults = UserDefaults.standard
         defaults.set((defaults.stringArray(forKey: addedKey) ?? []).filter { $0 != url.path }, forKey: addedKey)
-        defaults.set((defaults.stringArray(forKey: hiddenKey) ?? []).filter { $0 != url.path }, forKey: hiddenKey)
         defaults.set((defaults.stringArray(forKey: removedKey) ?? []).filter { $0 != url.path } + [url.path], forKey: removedKey)
         if selection == .project(url) { selection = .global }
         reloadProjects()
@@ -150,7 +141,7 @@ final class AppModel {
         var added = defaults.stringArray(forKey: addedKey) ?? []
         if !added.contains(url.path) { added.append(url.path) }
         defaults.set(added, forKey: addedKey)
-        setHidden(url, false)
+        reloadProjects()
         selection = .project(url)
     }
 
@@ -160,8 +151,12 @@ final class AppModel {
         guard let place = selection else { contexts = []; return }
         isResolving = true
         resolveTask = Task {
-            let (result, servers, configs, sharing, globalSync, health) = await Task.detached(priority: .userInitiated) {
-                let result = Self.contexts(for: place)
+            let (result, installed, servers, configs, sharing, globalSync, health) = await Task.detached(priority: .userInitiated) {
+                let order = AgentID.ordered()
+                let result = Self.contexts(for: place).sorted {
+                    order.firstIndex(of: $0.agent)! < order.firstIndex(of: $1.agent)!
+                }
+                let installed = Set(AgentID.allCases.filter { $0.isInstalled() })
                 let project: URL? = if case .project(let url) = place { url } else { nil }
                 let servers = Dictionary(uniqueKeysWithValues: AgentID.allCases.map {
                     ($0, MCPResolver.resolve(agent: $0, project: project))
@@ -178,10 +173,11 @@ final class AppModel {
                 for url in Self.files(result, configs) {
                     History.shared.observe(url)
                 }
-                return (result, servers, configs, sharing, globalSync, health)
+                return (result, installed, servers, configs, sharing, globalSync, health)
             }.value
             guard !Task.isCancelled else { return }
             contexts = result
+            self.installed = installed
             self.servers = servers
             configFiles = configs
             self.sharing = sharing

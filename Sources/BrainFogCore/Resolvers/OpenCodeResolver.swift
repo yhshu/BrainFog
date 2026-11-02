@@ -1,8 +1,7 @@
 import Foundation
 
-/// Models OpenCode's rule loading. The docs leave the merge order and
-/// multi-level behaviour open; where this resolver infers, entries say so.
-/// See docs/DESIGN.md §3.
+/// Models OpenCode's rule loading, from its docs and source
+/// (`session/instruction.ts`). See docs/DESIGN.md §3.
 public struct OpenCodeResolver: ContextResolver {
     public let agent = AgentID.openCode
 
@@ -30,29 +29,30 @@ public struct OpenCodeResolver: ContextResolver {
                      note: "fallback to the Claude Code global file")
         }
 
-        // Project: walk up from cwd (to the git root when there is one);
-        // the first AGENTS.md, or failing that CLAUDE.md, wins.
+        // Project: AGENTS.md, then CLAUDE.md, then the deprecated CONTEXT.md.
+        // Each name is looked for from cwd up to the git root; the first name
+        // found anywhere wins, and every copy of it is read, closest first.
         let chain = FileSupport.ancestors(of: cwd).reversed().filter { dir in
             projectRoot.map { FileSupport.isWithin(dir, $0) } ?? true
         }
-        var found = false
+        let projectOff = env.flag("OPENCODE_DISABLE_PROJECT_CONFIG")
+        let names = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"].filter { $0 != "CLAUDE.md" || !noClaudePrompt }
+        let winner = names.first { name in chain.contains { FileSupport.isFile($0.appendingPathComponent(name)) } }
         for dir in chain {
-            let agents = dir.appendingPathComponent("AGENTS.md")
-            let claude = dir.appendingPathComponent("CLAUDE.md")
-            let note = dir.path == cwd.path ? nil : "parent directory (first match; inferred)"
-            if found {
-                list.add(agents, scope: .project, timing: .skipped("a closer directory matched first"))
-                continue
-            }
-            if FileSupport.isFile(agents) {
-                list.add(agents, scope: .project, note: note)
-                list.add(claude, scope: .project, timing: .skipped("AGENTS.md in the same directory wins"))
-                found = true
-            } else if FileSupport.isFile(claude) {
-                list.add(claude, scope: .project,
-                         timing: noClaude ? .skipped("OPENCODE_DISABLE_CLAUDE_CODE is set") : .launch,
-                         note: note ?? "no AGENTS.md, falling back to CLAUDE.md")
-                found = !noClaude
+            let note = dir.path == cwd.path ? nil : "parent directory"
+            for name in ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"] {
+                let url = dir.appendingPathComponent(name)
+                let timing: LoadTiming = if projectOff {
+                    .skipped("OPENCODE_DISABLE_PROJECT_CONFIG is set")
+                } else if name == winner {
+                    .launch
+                } else if name == "CLAUDE.md" && noClaudePrompt {
+                    .skipped("OPENCODE_DISABLE_CLAUDE_CODE(_PROMPT) is set")
+                } else {
+                    .skipped("\(winner ?? "") was found, which OpenCode reads instead")
+                }
+                list.add(url, scope: .project, timing: timing,
+                         note: name == "CONTEXT.md" ? [note, "deprecated name"].compactMap { $0 }.joined(separator: ", ") : note)
             }
         }
 

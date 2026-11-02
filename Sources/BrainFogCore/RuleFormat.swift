@@ -81,7 +81,8 @@ public struct RuleFormat: Sendable, Hashable {
         let yaml = Frontmatter.split(text).yaml ?? ""
         switch field.kind {
         case .list: return Frontmatter.list(field.key, in: yaml).joined(separator: ", ")
-        default: return Frontmatter.scalar(field.key, in: yaml) ?? ""
+        // Reads folded and literal blocks (`key: >`) too, not just their marker.
+        default: return SkillResolver.frontmatter(text)[field.key] ?? Frontmatter.scalar(field.key, in: yaml) ?? ""
         }
     }
 
