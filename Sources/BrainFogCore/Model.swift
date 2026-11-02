@@ -36,22 +36,18 @@ extension AgentID {
     /// home folder, or, for the ones that live in VS Code or Cursor, storage
     /// for its extension.
     public func isInstalled(environment env: ResolverEnvironment = .init()) -> Bool {
-        func dir(_ variable: String, _ path: String) -> String {
-            env.variables[variable].map { FileSupport.expandTilde($0, home: env.home) }
-                ?? env.home.appendingPathComponent(path).path
-        }
         let editors = ["Code", "Code - Insiders", "Cursor"].map {
             env.home.appendingPathComponent("Library/Application Support/\($0)/User/globalStorage").path + "/"
         }
         let paths: [String] = switch self {
         case .claudeCode: [env.home.appendingPathComponent(".claude").path]
-        case .codex: [dir("CODEX_HOME", ".codex")]
+        case .codex: [env.codexHome.path]
         case .cursor: [env.home.appendingPathComponent(".cursor").path]
-        case .copilot: [dir("COPILOT_HOME", ".copilot")] + editors.prefix(2).map { $0 + "github.copilot-chat" }
+        case .copilot: [env.copilotHome.path] + editors.prefix(2).map { $0 + "github.copilot-chat" }
         case .geminiCLI: [GeminiResolver.home(env).appendingPathComponent(".gemini").path,
                           env.home.appendingPathComponent(".antigravity").path,
                           env.home.appendingPathComponent("Library/Application Support/Antigravity").path]
-        case .openCode: [dir("XDG_CONFIG_HOME", ".config") + "/opencode",
+        case .openCode: [env.directory("XDG_CONFIG_HOME", default: ".config").path + "/opencode",
                          env.home.appendingPathComponent(".local/share/opencode").path]
         case .cline: [env.home.appendingPathComponent(".cline").path,
                       env.home.appendingPathComponent("Documents/Cline").path] + editors.map { $0 + "saoudrizwan.claude-dev" }
@@ -73,7 +69,6 @@ public enum Scope: String, Codable, Sendable, CaseIterable {
     case user         // global, per user
     case project      // checked into the repository
     case local        // per user, per project, not committed
-    case directory    // nested below the working directory
     case rule         // modular rule files (.claude/rules)
     case autoMemory   // written by the agent itself
     case extra        // pulled in by configuration (OpenCode `instructions`)
@@ -86,7 +81,6 @@ public enum Scope: String, Codable, Sendable, CaseIterable {
         case .user: "Global"
         case .project: "Project"
         case .local: "Local"
-        case .directory: "Subdirectory"
         case .rule: "Rule"
         case .autoMemory: "Auto memory"
         case .extra: "Extra"
@@ -118,7 +112,6 @@ public struct ContextEntry: Identifiable, Sendable, Hashable {
     public var timing: LoadTiming
     /// Position in the final prompt, 0-based, among entries of this agent.
     public var order: Int
-    public var bytes: Int
     /// Tokens that actually reach the context (after truncation).
     public var tokens: Int
     public var truncated: Bool
@@ -126,14 +119,13 @@ public struct ContextEntry: Identifiable, Sendable, Hashable {
     public var note: String?
 
     public init(agent: AgentID, url: URL, scope: Scope, timing: LoadTiming, order: Int = 0,
-                bytes: Int = 0, tokens: Int = 0, truncated: Bool = false,
+                tokens: Int = 0, truncated: Bool = false,
                 importedBy: URL? = nil, note: String? = nil) {
         self.agent = agent
         self.url = url
         self.scope = scope
         self.timing = timing
         self.order = order
-        self.bytes = bytes
         self.tokens = tokens
         self.truncated = truncated
         self.importedBy = importedBy
@@ -217,6 +209,15 @@ public struct ResolverEnvironment: Sendable {
         guard let v = variables[name]?.lowercased() else { return false }
         return v == "1" || v == "true" || v == "yes"
     }
+
+    /// `$variable` with `~` expanded, else `default` under home.
+    func directory(_ variable: String, default path: String) -> URL {
+        variables[variable].map { URL(fileURLWithPath: FileSupport.expandTilde($0, home: home)) }
+            ?? home.appendingPathComponent(path)
+    }
+
+    var codexHome: URL { directory("CODEX_HOME", default: ".codex") }
+    var copilotHome: URL { directory("COPILOT_HOME", default: ".copilot") }
 }
 
 public protocol ContextResolver: Sendable {

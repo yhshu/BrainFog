@@ -158,19 +158,15 @@ public struct GlobalSyncReport: Sendable {
 
     /// Where each agent reads its global instructions from.
     static func globalFile(for agent: AgentID, env: ResolverEnvironment) -> URL? {
-        func dir(_ variable: String, default path: String) -> URL {
-            env.variables[variable].map { URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home)) }
-                ?? env.home.appendingPathComponent(path)
-        }
         return switch agent {
         case .claudeCode: env.home.appendingPathComponent(".claude/CLAUDE.md")
-        case .codex: dir("CODEX_HOME", default: ".codex").appendingPathComponent("AGENTS.md")
+        case .codex: env.codexHome.appendingPathComponent("AGENTS.md")
         case .openCode:
             (env.variables["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) } ?? env.home.appendingPathComponent(".config"))
                 .appendingPathComponent("opencode/AGENTS.md")
         case .cursor: nil
         case .geminiCLI: GeminiResolver.home(env).appendingPathComponent(".gemini/GEMINI.md")
-        case .copilot: dir("COPILOT_HOME", default: ".copilot").appendingPathComponent("copilot-instructions.md")
+        case .copilot: env.copilotHome.appendingPathComponent("copilot-instructions.md")
         case .devin: env.home.appendingPathComponent(".config/devin/AGENTS.md")
         case .cline: env.home.appendingPathComponent(".agents/AGENTS.md")
         }

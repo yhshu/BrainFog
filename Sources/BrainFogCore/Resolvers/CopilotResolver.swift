@@ -23,13 +23,11 @@ public struct CopilotResolver: ContextResolver {
             // @references are followed only in these files, and only inside the repository.
             guard ["copilot-instructions.md", "AGENTS.md", "CLAUDE.md"].contains(url.lastPathComponent) else { return }
             addReferences(of: url, text: text, timing: timing, root: FileSupport.isWithin(url, root) ? root : url.deletingLastPathComponent(),
-                          home: env.home, into: &list)
+                          into: &list)
         }
 
         // 1. Personal instructions.
-        let copilotHome = env.variables["COPILOT_HOME"].map {
-            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-        } ?? env.home.appendingPathComponent(".copilot")
+        let copilotHome = env.copilotHome
         add(copilotHome.appendingPathComponent("copilot-instructions.md"), .user)
         for url in FileSupport.walk(copilotHome.appendingPathComponent("instructions"), maxDepth: 4)
         where url.lastPathComponent.hasSuffix(".instructions.md") {
@@ -65,12 +63,6 @@ public struct CopilotResolver: ContextResolver {
         return list.finish(workingDirectory: cwd, projectRoot: projectRoot)
     }
 
-    /// A boolean from VS Code's user settings.json, or nil when unset.
-    static func vsCodeSetting(_ key: String, env: ResolverEnvironment) -> Bool? {
-        let file = env.home.appendingPathComponent("Library/Application Support/Code/User/settings.json")
-        return FileSupport.read(file).flatMap(JSONC.object(from:))?[key] as? Bool
-    }
-
     private func addInstructions(_ url: URL, scope: Scope, into list: inout EntryList) {
         let yaml = Frontmatter.split(FileSupport.read(url) ?? "").yaml ?? ""
         let applyTo = Frontmatter.commaList(Frontmatter.scalar("applyTo", in: yaml) ?? "")
@@ -89,19 +81,19 @@ public struct CopilotResolver: ContextResolver {
 
     /// `@relative/path` references, which must stay inside `root`.
     private func addReferences(of file: URL, text: String, timing: LoadTiming, root: URL,
-                               home: URL, into list: inout EntryList, depth: Int = 1) {
+                               into list: inout EntryList, depth: Int = 1) {
         guard depth <= 5 else { return }
         for path in ClaudeCodeResolver.importPaths(in: text) where !path.hasPrefix("/") && !path.hasPrefix("~") {
             let target = URL(fileURLWithPath: path, relativeTo: file.deletingLastPathComponent()).standardizedFileURL
             guard FileSupport.isFile(target), FileSupport.isWithin(target, root) else { continue }
             if list.contains(target) {
                 if timing.isLoadedAtLaunch, let sub = list.promote(target, importedBy: file) {
-                    addReferences(of: target, text: sub, timing: timing, root: root, home: home, into: &list, depth: depth + 1)
+                    addReferences(of: target, text: sub, timing: timing, root: root, into: &list, depth: depth + 1)
                 }
                 continue
             }
             guard let sub = list.add(target, scope: .imported, timing: timing, importedBy: file) else { continue }
-            addReferences(of: target, text: sub, timing: timing, root: root, home: home, into: &list, depth: depth + 1)
+            addReferences(of: target, text: sub, timing: timing, root: root, into: &list, depth: depth + 1)
         }
     }
 }

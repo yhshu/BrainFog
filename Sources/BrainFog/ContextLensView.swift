@@ -625,8 +625,7 @@ struct AgentSection: View {
 
     private var copyMessage: String {
         guard let plan = pendingCopy?.plan else { return "" }
-        let path = plan.destination.path.replacingOccurrences(
-            of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+        let path = displayPath(plan.destination)
         var text = plan.mode == .newFile
             ? "It will be saved as a new file, \(path), which \(context.agent.displayName) reads at the start of every session."
             : "Its text will be added to the end of \(path), which \(context.agent.displayName) reads at the start of every session."
@@ -757,7 +756,8 @@ struct SkillRow: View {
 
 func displayPath(_ url: URL) -> String {
     guard url.isFileURL else { return url.absoluteString }
-    return url.path.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+    let home = FileManager.default.homeDirectoryForCurrentUser.path + "/"
+    return url.path.hasPrefix(home) ? "~/" + url.path.dropFirst(home.count) : url.path
 }
 
 /// A path as a row shows it: relative to the project when it is inside it,

@@ -49,9 +49,7 @@ public struct CopyPlan: Sendable, Equatable {
                 header = "---\npaths:\n" + scope.map { "  - \(Frontmatter.quoted($0))\n" }.joined() + "---\n\n"
             }
         case .codex:
-            let dir = project ?? env.variables["CODEX_HOME"].map {
-                URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-            } ?? env.home.appendingPathComponent(".codex")
+            let dir = project ?? env.codexHome
             // AGENTS.override.md, when present and non-empty, replaces AGENTS.md.
             let override = dir.appendingPathComponent("AGENTS.override.md")
             let hasOverride = FileSupport.read(override).map {

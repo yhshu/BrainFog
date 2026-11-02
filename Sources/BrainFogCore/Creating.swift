@@ -37,9 +37,7 @@ public struct NewFileOption: Identifiable, Sendable, Hashable {
                       url: project.appendingPathComponent(".claude/rules"), needsName: true),
             ]
         case .codex:
-            let codexHome = env.variables["CODEX_HOME"].map {
-                URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-            } ?? env.home.appendingPathComponent(".codex")
+            let codexHome = env.codexHome
             return [project.map {
                 .init(title: "AGENTS.md", detail: "Also read by other agents",
                       url: $0.appendingPathComponent("AGENTS.md"), needsName: false)

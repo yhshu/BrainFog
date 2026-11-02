@@ -293,8 +293,6 @@ public enum MCPResolver {
 
     static func locations(for agent: AgentID, project: URL?, env: ResolverEnvironment) -> [Location] {
         let home = env.home
-        let configHome = env.variables["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }
-            ?? home.appendingPathComponent(".config")
         let appSupport = home.appendingPathComponent("Library/Application Support")
         var out: [Location] = []
         func add(_ file: URL, _ scope: Scope, _ format: Location.Format, note: String? = nil, writable: Bool = true,
@@ -314,9 +312,7 @@ public enum MCPResolver {
                 note: "Claude desktop app only; it wins a name clash there", writable: false)
         case .codex:
             // The Codex app, CLI and IDE extension share these files.
-            let codexHome = env.variables["CODEX_HOME"].map {
-                URL(fileURLWithPath: FileSupport.expandTilde($0, home: home))
-            } ?? home.appendingPathComponent(".codex")
+            let codexHome = env.codexHome
             add(codexHome.appendingPathComponent("config.toml"), .user, .codexToml)
             if let project {
                 // Each .codex/config.toml from the project root down, the
@@ -361,9 +357,7 @@ public enum MCPResolver {
             add(gemini.appendingPathComponent("antigravity/mcp_config.json"), .user, .json(key: "mcpServers"),
                 note: "older Antigravity location", writable: false)
         case .copilot:
-            let copilotHome = env.variables["COPILOT_HOME"].map {
-                URL(fileURLWithPath: FileSupport.expandTilde($0, home: home))
-            } ?? home.appendingPathComponent(".copilot")
+            let copilotHome = env.copilotHome
             // Copilot CLI walks from the folder up to the repository root;
             // closer files come first, and .mcp.json before .github/mcp.json.
             if let project {
@@ -443,7 +437,6 @@ public enum MCPResolver {
         return out
     }
 
-    /// The config files BrainFog may add servers to, most specific first.
     /// Config files of `agent` that exist but can't be parsed, so the agent
     /// reads no servers from them, or fails to start.
     public static func unreadableFiles(for agent: AgentID, project: URL?,
@@ -457,16 +450,15 @@ public enum MCPResolver {
         }
     }
 
+    /// The config files BrainFog may add servers to, most specific first.
     public static func editableFiles(for agent: AgentID, project: URL?,
                                      environment env: ResolverEnvironment = .init()) -> [MCPConfigFile] {
         let all = locations(for: agent, project: project, env: env).filter(\.writable)
-        var seen = Set<Scope>()
         var out: [MCPConfigFile] = []
         // One file per layer: the one that exists, else the first.
         for scope in [Scope.project, .user] {
             guard let l = all.first(where: { $0.scope == scope && FileSupport.isFile($0.file) })
-                    ?? all.first(where: { $0.scope == scope }), !seen.contains(scope) else { continue }
-            seen.insert(scope)
+                    ?? all.first(where: { $0.scope == scope }) else { continue }
             out.append(MCPConfigFile(file: l.file, scope: l.scope, note: l.note))
         }
         // Other writable files of a layer that already exist (VS Code's mcp.json next to Copilot CLI's).
@@ -743,9 +735,7 @@ public enum MCPEdit {
         return text.trimmingCharacters(in: .whitespaces)
     }
 
-    private static func display(_ url: URL, _ env: ResolverEnvironment) -> String {
-        url.path.replacingOccurrences(of: env.home.path, with: "~")
-    }
+    private static func display(_ url: URL, _ env: ResolverEnvironment) -> String { GlobalSyncReport.display(url, env) }
 }
 
 public enum MCPCopy {
@@ -1041,7 +1031,7 @@ enum CodexMCPToml {
         s.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
     }
 
-    private static func strings(in s: String) -> [String] {
+    static func strings(in s: String) -> [String] {
         let re = try! NSRegularExpression(pattern: #""((?:[^"\\]|\\.)*)"|'([^']*)'"#)
         return re.matches(in: s, range: NSRange(s.startIndex..., in: s)).compactMap { m in
             if let r = Range(m.range(at: 1), in: s) { return unescape(String(s[r])) }

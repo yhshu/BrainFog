@@ -20,7 +20,7 @@ public struct Skill: Identifiable, Sendable, Hashable {
     /// The skill as a file entry, for the editor.
     public var entry: ContextEntry {
         ContextEntry(agent: agent, url: url, scope: scope, timing: timing,
-                     bytes: FileSupport.size(url), tokens: tokens, note: note)
+                     tokens: tokens, note: note)
     }
 }
 
@@ -39,9 +39,7 @@ public enum SkillResolver {
                                environment env: ResolverEnvironment = .init()) -> [Skill] {
         // Project folders from the repository root (or the folder itself) down.
         var projectDirs: [URL] = []
-        let codexHome = env.variables["CODEX_HOME"].map {
-            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-        } ?? env.home.appendingPathComponent(".codex")
+        let codexHome = env.codexHome
         let codexConfig = agent == .codex ? workingDirectory.map { CodexConfig(codexHome: codexHome, cwd: $0) } : nil
         if let cwd = workingDirectory?.standardizedFileURL {
             // Codex finds the root by its project_root_markers.
@@ -49,17 +47,14 @@ public enum SkillResolver {
             projectDirs = root.map { r in FileSupport.ancestors(of: cwd).filter { FileSupport.isWithin($0, r) } } ?? [cwd]
             projectDirs.removeAll { $0.path == env.home.path }
         }
-        let copilotHome = env.variables["COPILOT_HOME"].map {
-            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-        } ?? env.home.appendingPathComponent(".copilot")
+        let copilotHome = env.copilotHome
         let configHome = env.variables["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0) }
             ?? env.home.appendingPathComponent(".config")
 
         var found: [Skill] = []
-        func scan(_ dir: URL, _ scope: Scope, note: String? = nil, recursive: Bool = false, timing: LoadTiming = .launch) {
-            for var skill in skills(in: dir, agent: agent, scope: scope, note: note, recursive: recursive)
+        func scan(_ dir: URL, _ scope: Scope, note: String? = nil, recursive: Bool = false) {
+            for skill in skills(in: dir, agent: agent, scope: scope, note: note, recursive: recursive)
             where !found.contains(where: { $0.url.path == skill.url.path }) {
-                skill.timing = timing
                 found.append(skill)
             }
         }
@@ -70,9 +65,8 @@ public enum SkillResolver {
             scan(env.home.appendingPathComponent(".claude/skills"), .user)
             scan(env.home.appendingPathComponent(".claude/skills/synced"), .user, note: "synced from claude.ai")
             for dir in projectDirs { scan(dir.appendingPathComponent(".claude/skills"), .project) }
-            let shared = found.count
             var seen = Set<String>()
-            for i in found.indices.prefix(shared) {
+            for i in found.indices {
                 if seen.contains(found[i].name) {
                     found[i].timing = .skipped("a higher-priority skill has the same name")
                 }

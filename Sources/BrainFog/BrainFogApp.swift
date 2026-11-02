@@ -427,7 +427,6 @@ extension Scope {
         case .user: "globe"
         case .project: "folder"
         case .local: "person.crop.circle"
-        case .directory: "folder.badge.gearshape"
         case .rule: "list.bullet.rectangle"
         case .autoMemory: "brain"
         case .extra: "plus.rectangle.on.rectangle"

@@ -256,9 +256,9 @@ public struct AgentPack: Codable, Sendable, Equatable {
     }
 
     /// The variable a credential becomes: `--api-key` gives `API_KEY`.
-    private static func variable(_ name: String, fallback: String) -> String {
+    private static func variable(_ name: String) -> String {
         let words = name.uppercased().split { !$0.isLetter && !$0.isNumber }
-        return words.isEmpty ? fallback : words.joined(separator: "_")
+        return words.isEmpty ? "TOKEN" : words.joined(separator: "_")
     }
 
     /// `Authorization: Bearer xyz` (as passed to `--header`) with the value
@@ -268,7 +268,7 @@ public struct AgentPack: Codable, Sendable, Equatable {
         guard let head = s.range(of: #"^[A-Za-z][A-Za-z0-9_-]*:[ \t]*"#, options: .regularExpression) else { return nil }
         let header = String(s[..<s[head].firstIndex(of: ":")!]), value = String(s[head.upperBound...])
         guard namesSecret(header), !value.isEmpty, !value.hasPrefix("$"), !Secrets.onlyReferences(value) else { return nil }
-        let name = variable(header, fallback: "TOKEN")
+        let name = variable(header)
         names.append(name)
         return String(s[..<head.upperBound]) + "${\(name)}"
     }
@@ -295,7 +295,7 @@ public struct AgentPack: Codable, Sendable, Equatable {
                     continue
                 }
                 guard isSecretValue(value, named: namesSecret(flag)) else { continue }
-                let name = variable(flag, fallback: "TOKEN")
+                let name = variable(flag)
                 out[i] = flag + "=${\(name)}"
                 names.append(name)
             } else if !arg.hasPrefix("-") {
@@ -305,7 +305,7 @@ public struct AgentPack: Codable, Sendable, Equatable {
                 }
                 let flag = i > 0 && args[i - 1].hasPrefix("-") && !args[i - 1].contains("=") ? args[i - 1] : ""
                 guard isSecretValue(arg, named: namesSecret(flag)) else { continue }
-                let name = variable(flag, fallback: "TOKEN")
+                let name = variable(flag)
                 out[i] = "${\(name)}"
                 names.append(name)
             }
@@ -323,7 +323,7 @@ public struct AgentPack: Codable, Sendable, Equatable {
             let key = String(item[..<eq]), value = String(item[item.index(after: eq)...])
             let decoded = value.removingPercentEncoding ?? value
             guard isSecretValue(decoded, named: namesSecret(key)) else { return String(item) }
-            let name = variable(key, fallback: "TOKEN")
+            let name = variable(key)
             names.append(name)
             return key + "=${\(name)}"
         }

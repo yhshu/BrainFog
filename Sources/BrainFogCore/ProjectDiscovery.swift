@@ -31,9 +31,7 @@ public enum ProjectDiscovery {
         }
 
         // Codex: `[projects."<path>"]` tables in config.toml.
-        let codexHome = env.variables["CODEX_HOME"].map {
-            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-        } ?? env.home.appendingPathComponent(".codex")
+        let codexHome = env.codexHome
         if let text = FileSupport.read(codexHome.appendingPathComponent("config.toml")) {
             let re = try! NSRegularExpression(pattern: #"^\[projects\."([^"]+)"\]"#, options: .anchorsMatchLines)
             for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) {

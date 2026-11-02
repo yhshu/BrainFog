@@ -1,118 +1,109 @@
 # BrainFog Design
 
-A native macOS app that shows what each AI coding agent (Claude Code, Codex, Cursor, GitHub Copilot, Gemini, OpenCode, Cline, Devin) actually loads into its context, and lets you edit, share and move those files safely.
+A native macOS app that answers: **started in this folder, what does each AI coding agent read, in what order, at what token cost, and what is shadowed, cut off or ignored?** Editing, copying between agents, shared AGENTS.md, global sync, health checks, history and `.agentpack` export all serve that view.
 
-## 1. Purpose
+## Principles
 
-Every agent layers its own instruction files, rules, memory, skills and MCP servers (global → project → directory), each by different rules. BrainFog answers one question: **started in this folder, what does this agent read, in what order, at what token cost, and what is shadowed, cut off or ignored?** Everything else (editing, copying between agents, keeping one shared AGENTS.md or global file, health checks, history, `.agentpack` export) serves that view.
+- **Resolvers are pure**: (cwd, home, environment, filesystem) → `ResolvedContext`, tested in temporary folders. Undocumented rules are labelled as inferred.
+- **Show before writing**: every change is a diff, checked against the file's current text, applied all or nothing, and kept in History. Only switching an MCP server off skips the preview. Codex's memory database is read-only.
+- **Launch-time files only**: files in subfolders load once an agent works there, so BrainFog doesn't walk the project for them. The subfolder rules below describe the agents, not what BrainFog lists.
+- **Uninstalled agents** sort last, show as one line, and are skipped by sync.
+- **Unsaved edits are never dropped**; a file deleted elsewhere stays open so it can be saved back.
+- **Tests never touch real files**: `ResolverEnvironment` takes a temporary home; `BRAINFOG_HOME` points the whole app at one.
+- **Agent order**: installed first, then Claude Code, Codex, Cursor, Copilot, Gemini, OpenCode, Cline, Devin.
 
-## 2. Principles
+## Loading rules
 
-- **Resolvers are pure**: (cwd, home, environment, filesystem) → `ResolvedContext`, unit-tested in temporary folders. Rules that aren't documented are labelled as inferred.
-- **Write little, show first**: BrainFog writes only what the user asks for. Every change is shown as a diff, checked against the file's current content, applied all or nothing, and kept in History. The one exception is switching an MCP server off, which only takes something away. Codex's memory database is read-only.
-- **No search below the project folder**: files in subfolders (nested CLAUDE.md, AGENTS.md, GEMINI.md, rule folders, skill folders) load only once an agent works there, so BrainFog doesn't walk the project for them and doesn't list them. Walking a large repository took tens of seconds on every refresh. The subfolder rules in §3 describe the agents, not what BrainFog shows.
-- **Nothing for agents that aren't installed**: they sort last, show as a single line, and syncing skips them.
-- **Unsaved edits are never dropped silently**; a file deleted elsewhere stays open so it can be saved back.
-- **Tests never touch the user's files**: `ResolverEnvironment` takes a temporary home, and `BRAINFOG_HOME` points the whole app at one.
-- **Agent order**: installed agents first, then roughly by how widely each is used with instruction files (Claude Code, Codex, Cursor, Copilot, Gemini, OpenCode, Cline, Devin).
+Desktop and IDE clients read the same files as each CLI unless noted.
 
-## 3. Per-agent loading rules (checked against official docs, 2026-11)
-
-Each agent's desktop or IDE client is modelled along with its CLI; entries and notes say where they differ.
-
-### Claude Code (CLI, IDE extensions and the desktop app's Code tab read the same files)
-1. Managed: `/Library/Application Support/ClaudeCode/CLAUDE.md` (loaded first; cannot be excluded).
-2. User: `~/.claude/CLAUDE.md`, `~/.claude/rules/**/*.md`.
-3. Ancestor directories: from the filesystem root down to cwd, at each level `CLAUDE.md`, `.claude/CLAUDE.md`, then `CLAUDE.local.md` (within a level, local comes last). Everything is concatenated; closer files come later.
-4. If cwd and its ancestors contain **no** `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md` at all, then `AGENTS.md` and `.claude/AGENTS.md` are read at each level instead (v2.1.277+). User / managed / rules do not take part in this check.
-5. `.claude/rules/**/*.md`: files without `paths` frontmatter load at startup; files with `paths` load on demand when a matching file is read or written.
-6. CLAUDE.md in subdirectories: on demand (when Claude reads or writes files in that subdirectory). A subdirectory's AGENTS.md loads the same way when that folder has no CLAUDE.md, `.claude/CLAUDE.md` or `CLAUDE.local.md`.
-7. `@path` imports: resolved relative to the containing file, at most 4 hops.
-8. Auto memory: `~/.claude/projects/<encoded git root path>/memory/MEMORY.md`; at startup only the first 200 lines or 25KB are loaded; topic files are read on demand. `autoMemoryDirectory` changes the location, and `autoMemoryEnabled` turns it off. Encoding: characters in the path other than `[A-Za-z0-9-]` are replaced with `-`.
-9. `claudeMdExcludes`: excludes by absolute-path glob (except managed); arrays merge across user, project, local and managed settings (`managed-settings.json`, then `managed-settings.d/*.json` by name).
-10. MCP servers in a project's `.mcp.json` need the user's approval. `enabledMcpjsonServers` and `disabledMcpjsonServers` in `.claude/settings.json` or `.claude/settings.local.json` record the answer; a server in neither list is asked about when a session starts, unless `enableAllProjectMcpServers` is true.
-11. Project instructions (`pluginConfigs["cc-plugin-agents-md@builtin"].options.instructionFiles`, older ID `agents-md@builtin`), read from user and managed settings only: `claude-md-or-agents-md` (default, rule 4), `claude-md-and-agents-md` (both; CLAUDE files first in each folder), `claude-md` (never AGENTS.md), `managed-only` (only the managed CLAUDE.md and auto memory at launch; path-scoped rules and subdirectory files still load on demand).
-12. A CLAUDE.md over 4 MiB is skipped whole. Skills in `<subdir>/.claude/skills` below cwd load when Claude touches that folder, under their own `folder:name`. The desktop app also reads MCP servers from `~/Library/Application Support/Claude/claude_desktop_config.json`, which the CLI never does.
+### Claude Code
+1. Managed `/Library/Application Support/ClaudeCode/CLAUDE.md` first; can't be excluded.
+2. User `~/.claude/CLAUDE.md`, `~/.claude/rules/**/*.md`.
+3. From `/` down to cwd, at each level `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`; closer files come later.
+4. If no level has any of those, `AGENTS.md` and `.claude/AGENTS.md` are read instead. User, managed and rules files don't count.
+5. `.claude/rules/**/*.md` without `paths` load at launch; with `paths`, on demand.
+6. Subdirectory CLAUDE.md (or AGENTS.md when it has none) and `<subdir>/.claude/skills` load on demand.
+7. `@path` imports, relative to the file, at most 4 hops.
+8. Auto memory `~/.claude/projects/<git root, non-[A-Za-z0-9-] → ->/memory/MEMORY.md`: first 200 lines or 25 KB at launch. `autoMemoryDirectory`, `autoMemoryEnabled`.
+9. `claudeMdExcludes` (absolute-path globs, not managed) merge across user, project, local and managed settings (`managed-settings.json`, then `managed-settings.d/*.json`).
+10. `.mcp.json` servers need approval: `enabledMcpjsonServers` / `disabledMcpjsonServers` in `.claude/settings(.local).json`, or `enableAllProjectMcpServers`.
+11. `pluginConfigs["cc-plugin-agents-md@builtin"].options.instructionFiles` (or `agents-md@builtin`), user and managed settings only: `claude-md-or-agents-md` (default, rule 4), `claude-md-and-agents-md` (CLAUDE first per folder), `claude-md`, `managed-only` (managed CLAUDE.md and auto memory at launch).
+12. A CLAUDE.md over 4 MiB is skipped. The desktop app also reads `~/Library/Application Support/Claude/claude_desktop_config.json` for MCP.
 
 ### Codex
-1. Under `CODEX_HOME` (default `~/.codex`), `AGENTS.override.md`, otherwise `AGENTS.md`; the first non-empty one is used.
-2. Walk from the project root (the nearest folder with one of `project_root_markers`, default `.git`; an empty list or no match means only cwd) down to cwd, checking `AGENTS.override.md`, `AGENTS.md`, then `project_doc_fallback_filenames` at each level. The first name that exists is the level's file; if it is empty the level contributes nothing.
-3. Concatenated with the root first and cwd last; empty files are skipped; loading stops once the total reaches `project_doc_max_bytes` (default 32 KiB).
-4. Trust (`projects."<path>".trust_level`): a project marked `untrusted` (cwd's entry, else the git root's) loads no project AGENTS.md, only the global one. Each `.codex/config.toml` from the root down to cwd applies only when trusted (its folder's entry, else the project root's, else the git root's) and overrides the user config, closest winning; it can't set `project_root_markers`. Unmarked projects load AGENTS.md but not their config. From codex-rs `core/src/agents_md.rs` and `config/src/loader`. The Codex app, CLI and IDE extension share all of this.
-5. Skills: `.agents/skills` from cwd up to the root, `~/.agents/skills`, `/etc/codex/skills`; same-named skills are both offered; `[[skills.config]]` with `enabled = false` turns one off. `memories.use_memories = false` keeps memories out of the prompt.
-6. Memories: generated state, stored in `~/.codex/memories/`; intermediate pipeline data lives in `~/.codex/memories_1.sqlite` (`stage1_outputs` holds per-thread raw memories). **BrainFog treats this database as read-only**: it belongs to Codex, and the official docs advise against editing it by hand.
+1. `CODEX_HOME` (default `~/.codex`): first non-empty of `AGENTS.override.md`, `AGENTS.md`.
+2. From the project root (nearest `project_root_markers` folder, default `.git`; none → cwd only) down to cwd: first existing of `AGENTS.override.md`, `AGENTS.md`, `project_doc_fallback_filenames`. Empty files contribute nothing.
+3. Root first; stops at `project_doc_max_bytes` (32 KiB).
+4. `projects."<path>".trust_level = "untrusted"` (cwd's, else the git root's) loads no project AGENTS.md. Each `.codex/config.toml` from root to cwd applies only when trusted (its folder, else project root, else git root), closest winning, and can't set `project_root_markers`.
+5. Skills: `.agents/skills` from cwd up to the root, `~/.agents/skills`, `/etc/codex/skills`; `[[skills.config]] enabled = false` turns one off. `memories.use_memories = false` hides memories.
+6. Memories in `~/.codex/memories/` and `memories_1.sqlite` (read-only).
 
 ### OpenCode
-From the docs and source (`session/instruction.ts`).
-1. Project: try `AGENTS.md`, then `CLAUDE.md`, then the deprecated `CONTEXT.md`, each from cwd up to the git root. The first name found anywhere wins, and every copy of it loads, closest first, so a parent's AGENTS.md beats a closer CLAUDE.md.
-2. Global: `~/.config/opencode/AGENTS.md`; if it does not exist, fall back to `~/.claude/CLAUDE.md`.
-3. `OPENCODE_DISABLE_CLAUDE_CODE` turns off every `.claude` fallback (files and skills); `..._PROMPT` turns off CLAUDE.md, global and project; `..._SKILLS` turns off `.claude/skills`; `OPENCODE_DISABLE_PROJECT_CONFIG` turns off project rules.
-4. `instructions` in `opencode.json(c)`: paths, globs, and remote URLs, merged with AGENTS.md. Absolute entries glob their last component. Relative ones are globbed in every folder from cwd up to the git root, whichever config file lists them (with `OPENCODE_DISABLE_PROJECT_CONFIG`, only in `~/.config/opencode`).
-5. Config files merge in this order, later winning: global, `OPENCODE_CONFIG`, project files from the git root down to cwd, `.opencode/` folders, `OPENCODE_CONFIG_DIR`, managed `/Library/Application Support/opencode/`. `instructions` and MCP servers are read from all of them. The TUI and desktop app share them.
+1. Project: the first of `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md` found anywhere from cwd up to the git root; every copy of that name loads, closest first.
+2. Global `~/.config/opencode/AGENTS.md`, else `~/.claude/CLAUDE.md`.
+3. `OPENCODE_DISABLE_CLAUDE_CODE` (all `.claude` fallbacks), `…_PROMPT` (CLAUDE.md), `…_SKILLS` (`.claude/skills`), `OPENCODE_DISABLE_PROJECT_CONFIG` (project config).
+4. `instructions` (paths, globs, URLs): absolute entries glob their last component; relative ones are globbed in every folder from cwd up to the git root (only `~/.config/opencode` without project config).
+5. Config order, later winning: global, `OPENCODE_CONFIG`, project files root → cwd, `.opencode/`, `OPENCODE_CONFIG_DIR`, managed `/Library/Application Support/opencode/`. `instructions` and MCP come from all.
 
-### Cursor (closed source; from cursor.com/docs, 2026-10)
-1. The workspace is the folder Cursor opened; there is no walk up to parent directories.
-2. Project rules: `.cursor/rules/**/*.mdc` (plain `.md` there is ignored). Frontmatter decides loading: `alwaysApply: true` → every chat; `globs` → when a matching file is in context; only `description` → when the agent judges it relevant; none → only when @-mentioned.
-3. `.cursor/rules` and `AGENTS.md` in subdirectories apply when working in that folder, combined with the root ones.
-4. `AGENTS.md` at the root is always applied. The Cursor CLI also reads `CLAUDE.md` at the root; the editor does not document it.
-5. `.cursorrules` (legacy) is still read but deprecated.
-6. User Rules (Settings) and Team Rules (dashboard) are not files, so BrainFog can only mention them. Cursor's Memories feature was removed in 2.1, so there is no generated memory to show.
-7. Skills: `.agents/skills`, `.cursor/skills`, plus `.claude/skills` and `.codex/skills`, at project and user level; Cursor's own skills ship in `~/.cursor/skills-cursor`. Each root is searched recursively for SKILL.md, and `.agents/skills` or `.cursor/skills` deeper in the project apply to files below that folder. The editor and `cursor-agent` share rules, skills and `mcp.json`.
+### Cursor
+1. Workspace only; no walk up.
+2. `.cursor/rules/**/*.mdc`: `alwaysApply` → always; `globs` → matching files; only `description` → agent decides; none → @-mention.
+3. Subfolder `.cursor/rules` and `AGENTS.md` apply in that folder.
+4. Root `AGENTS.md` always; the CLI also reads root `CLAUDE.md`. `.cursorrules` is legacy but read.
+5. User and Team Rules aren't files.
+6. Skills: `.agents`, `.cursor`, `.claude`, `.codex` skills folders at project and user level, searched recursively; `~/.cursor/skills-cursor` is built in.
 
-### Gemini (Gemini CLI, Antigravity and Antigravity CLI, which share `~/.gemini`)
-Gemini CLI, from source at v0.67 (2026-10):
-1. File names: `GEMINI.md`, plus any names in `context.fileName`, which are added in front of it rather than replacing it. Every name is checked at every location. `GEMINI_CLI_HOME` replaces home.
-2. Global: `~/.gemini/<names>`. Private project memory: `~/.gemini/tmp/<slug>/memory/MEMORY.md`, falling back to `<names>` in that directory. The slug is for the folder Gemini started in (not the repo root): from `~/.gemini/projects.json`, or else that folder's name.
-3. Project: walk up from cwd to the nearest `context.memoryBoundaryMarkers` folder (default `.git`). With no marker, only cwd is checked. Paths are sorted as strings.
-4. No downward scan at launch. Files below cwd load just in time, when a tool reads or edits a path there.
-5. `@path` imports, at most 5 levels deep, and they must stay inside the project root. Extensions add `contextFileName` from `gemini-extension.json`.
-6. There is no `save_memory` tool any more; the agent edits these Markdown files directly. MCP: `mcpServers` in settings.json; remote servers use `url` plus `type`. `mcp.allowed` and `mcp.excluded` filter servers, and `gemini mcp disable` (or `/mcp disable`) records `{"<name>": {"enabled": false}}` in `~/.gemini/mcp-server-enablement.json`.
+### Gemini (Gemini CLI and Antigravity share `~/.gemini`)
+Gemini CLI:
+1. Names: `context.fileName` entries, then `GEMINI.md`, all checked everywhere. `GEMINI_CLI_HOME` replaces home.
+2. Global `~/.gemini/<names>`. Project memory `~/.gemini/tmp/<slug>/memory/MEMORY.md` (else `<names>` there); slug from `~/.gemini/projects.json`, else the start folder's name.
+3. Walk up from cwd to the nearest `context.memoryBoundaryMarkers` (default `.git`); none → cwd only.
+4. Files below cwd load when a tool touches them.
+5. `@path` imports, 5 levels, inside the project root. Extensions add `contextFileName`.
+6. MCP `mcpServers` in settings.json (`url` + `type`), filtered by `mcp.allowed` / `mcp.excluded`; `~/.gemini/mcp-server-enablement.json` records `{"<name>": {"enabled": false}}`.
 
-Antigravity (antigravity.google/docs/rules, /mcp, /skills, /cli/gcli-migration):
-7. Always-on text: `~/.gemini/GEMINI.md`, `~/.gemini/AGENTS.md`, `~/.gemini/config/{AGENTS,GEMINI}.md`; at the workspace and each folder up to the repo root, `AGENTS.md`, `GEMINI.md`, `.agents/AGENTS.md`, `.agents/GEMINI.md`.
-8. Rules: `~/.gemini/config/rules/*.md`, `.agents/rules/*.md` (legacy `.agent/rules`), direct children only. `trigger` is `always_on|model_decision|glob|manual` (the CLI has no `manual`); a rule without one is dropped. 24,000 bytes per rule. Workflows (`.agents/workflows`, `~/.gemini/config/workflows`) run when invoked.
-9. MCP: `~/.gemini/config/mcp_config.json` and `.agents/mcp_config.json` (`mcpServers`; remote `serverUrl`, `url` still accepted; `disabled` in place). Older builds used `~/.gemini/antigravity/mcp_config.json`.
-10. Skills: `.agents/skills` up to the repo root (legacy `.agent/skills`), `~/.gemini/config/skills`, `~/.gemini/skills`, `~/.gemini/antigravity-cli/skills`, legacy `~/.gemini/antigravity/skills`.
+Antigravity:
+7. Always on: `~/.gemini/{GEMINI,AGENTS}.md`, `~/.gemini/config/{AGENTS,GEMINI}.md`; from workspace up to repo root, `AGENTS.md`, `GEMINI.md`, `.agents/AGENTS.md`, `.agents/GEMINI.md`.
+8. Rules `~/.gemini/config/rules/*.md`, `.agents/rules/*.md` (or `.agent/rules`): `trigger` is `always_on|model_decision|glob|manual`, none → dropped; 24,000 bytes each.
+9. MCP `~/.gemini/config/mcp_config.json`, `.agents/mcp_config.json` (`serverUrl` or `url`; `disabled`), legacy `~/.gemini/antigravity/mcp_config.json`.
+10. Skills `.agents/skills` up to the repo root (or `.agent/skills`), `~/.gemini/config/skills`, `~/.gemini/skills`, `~/.gemini/antigravity-cli/skills`, `~/.gemini/antigravity/skills`.
 
-### GitHub Copilot (Copilot CLI and VS Code's Copilot harness)
-1. User: `~/.copilot/copilot-instructions.md` and `~/.copilot/instructions/**/*.instructions.md` (`COPILOT_HOME`).
-2. Standard locations: the repo root, cwd, and every folder between, plus folders of files the agent works on (lazy). At each, it checks `.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md` and `GEMINI.md`, and concatenates them all.
-3. `.github/instructions/**/*.instructions.md` at the root and cwd. `applyTo` globs decide when each applies (`**` means always). `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` adds more directories.
-4. `@relative` references are followed in copilot-instructions.md, AGENTS.md and CLAUDE.md, but only inside the repo.
-5. VS Code's Local harness differs. It follows the `chat.*` settings; nested AGENTS.md is off by default; it also reads `~/.claude/CLAUDE.md` and `.claude/rules`. Copilot Memory is stored on GitHub.
-6. MCP in Copilot CLI: `.mcp.json` then `.github/mcp.json` from cwd up to the repo root, the closer file winning a name, then `~/.copilot/mcp-config.json` (key `mcpServers`, which project files may leave out). VS Code instead reads `.vscode/mcp.json` and its user `mcp.json` (key `servers`), and discovers Copilot CLI's config.
+### GitHub Copilot
+1. User `~/.copilot/copilot-instructions.md`, `~/.copilot/instructions/**/*.instructions.md` (`COPILOT_HOME`).
+2. Repo root through cwd (plus worked-on folders, lazily): `.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `GEMINI.md`, all concatenated.
+3. `.github/instructions/**/*.instructions.md` at root and cwd; `applyTo` (`**` = always). `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` adds folders.
+4. `@relative` references inside the repo.
+5. VS Code's harness follows `chat.*` settings, has nested AGENTS.md off, and also reads `~/.claude/CLAUDE.md` and `.claude/rules`.
+6. CLI MCP: `.mcp.json`, `.github/mcp.json` from cwd up to the repo root (closer wins; inferred), then `~/.copilot/mcp-config.json`. VS Code: `.vscode/mcp.json` and user `mcp.json` (`servers`).
 
-### Devin Desktop (formerly Windsurf; Devin Local agent, from docs.devin.ai)
-Windsurf was renamed Devin Desktop on 2026-06-02. Cascade can no longer start conversations, so only Devin Local is modelled.
-1. Global: `~/.config/devin/AGENTS.md` (or `AGENT.md`), `~/.claude/CLAUDE.md`, `~/.devin/global_rules.md`, `~/.devin/rules/*.md`.
-2. From the workspace root to cwd (only the root's files at session start; deeper ones lazily), these are always on: `AGENTS.md`, `AGENTS.local.md`, `AGENT.md`, `.windsurfrules`, `CLAUDE.md`. Also `.devin/global_rules.md` (wins over `.windsurf/global_rules.md`), plus `.devin/rules/*.md` and `.windsurf/rules/*.md`, whose `trigger` is `always_on|glob|model_decision|agent|manual` (`agent` is treated like `model_decision`).
-3. Cursor rules (`.cursor/rules/*.md|mdc`) are read with Cursor's frontmatter. `read_config_from` in `~/.config/devin/config.json` or `.devin/config.json` turns the claude, cursor, windsurf and agents_standard imports off.
-4. Subdirectory copies load lazily. No size limits are documented.
-5. MCP: `~/.config/devin/mcp_config.json`, `.devin/mcp_config.json`, `.devin/mcp_config.local.json` (`mcpServers`; remote servers use `url` plus `transport`). Other tools' files are imported, each behind its `read_config_from` switch: `windsurf` → `~/.codeium/windsurf/mcp_config.json` (stable channel); `claude` → `.mcp.json`, `.claude/settings(.local).json`, `~/.claude.json`, `~/.claude/settings(.local).json`, `~/.claude/mcp_servers.json`; `cursor` → `.cursor/mcp.json`; `opencode` → `opencode.json`, `~/.config/opencode/opencode.json`. BrainFog shows these read-only. Zed's are not modelled. Devin Desktop and Devin CLI read the same files.
+### Devin (Devin Desktop and Devin CLI; Devin Local agent only)
+1. Global `~/.config/devin/AGENTS.md` (or `AGENT.md`), `~/.claude/CLAUDE.md`, `~/.devin/global_rules.md`, `~/.devin/rules/*.md`.
+2. Workspace root at start, deeper folders lazily: `AGENTS.md`, `AGENTS.local.md`, `AGENT.md`, `.windsurfrules`, `CLAUDE.md`; `.devin/global_rules.md` (over `.windsurf/`); `.devin/rules/*.md`, `.windsurf/rules/*.md` with `trigger` `always_on|glob|model_decision|agent|manual`.
+3. `.cursor/rules/*.md|mdc` with Cursor frontmatter. `read_config_from` (`~/.config/devin/config.json`, `.devin/config.json`) turns off the claude, cursor, windsurf and agents_standard imports.
+4. MCP `~/.config/devin/mcp_config.json`, `.devin/mcp_config(.local).json` (`url` + `transport`), plus read-only imports behind `read_config_from`: windsurf `~/.codeium/windsurf/mcp_config.json`; claude `.mcp.json`, `.claude/settings(.local).json`, `~/.claude.json`, `~/.claude/settings(.local).json`, `~/.claude/mcp_servers.json`; cursor `.cursor/mcp.json`; opencode `opencode.json`, `~/.config/opencode/opencode.json`.
 
-### Cline (from source, 2026-10)
-Cline ships two engines in one extension and picks one per user, which can't be told from disk. BrainFog models the SDK engine, which Cline CLI also uses, and notes where the older one differs.
-1. Search order: `<root>/AGENTS.md`, `<root>/.clinerules` (a file, or a folder read non-recursively), `<root>/.cline/rules/`, `~/.agents/AGENTS.md`, `~/.cline/rules/`, `~/Cline/Rules`, `~/Documents/Cline/Rules`. Extensions are `.md`, `.markdown` and `.txt`.
-2. Rule name is frontmatter `name` or the file name. A later rule with the same name replaces an earlier one. `disabled: true` or `enabled: false` turns a rule off. Rules are sorted by name.
-3. `paths` is not evaluated by the SDK engine, so those rules are always on. The older engine honours `paths`, reads subfolders, and also reads `.cursorrules`, `.cursor/rules/*.mdc` and `.windsurfrules`.
-4. Skills, winner first on a name clash: `~/.agents/skills`, `~/.cline/skills`, then at the workspace root only `.agents`, `.claude`, `.cline`, `.clinerules` skills folders.
-5. MCP: `~/.cline/data/settings/cline_mcp_settings.json` (`CLINE_DATA_DIR`, `CLINE_MCP_SETTINGS_PATH`). The older engine uses VS Code globalStorage `saoudrizwan.claude-dev`. A remote server without a `type` is SSE.
+### Cline (SDK engine, also used by Cline CLI)
+1. Order: `<root>/AGENTS.md`, `<root>/.clinerules` (file, or folder non-recursively), `<root>/.cline/rules/`, `~/.agents/AGENTS.md`, `~/.cline/rules/`, `~/Cline/Rules`, `~/Documents/Cline/Rules`; `.md`, `.markdown`, `.txt`.
+2. Name is frontmatter `name` or the file name; a later same-named rule replaces an earlier one; `disabled: true` / `enabled: false` turns one off; sorted by name.
+3. `paths` is ignored. The older engine honours it, reads subfolders, `.cursorrules`, `.cursor/rules/*.mdc` and `.windsurfrules`.
+4. Skills, first wins: `~/.agents/skills`, `~/.cline/skills`, then root `.agents`, `.claude`, `.cline`, `.clinerules` skills folders.
+5. MCP `~/.cline/data/settings/cline_mcp_settings.json` (`CLINE_DATA_DIR`, `CLINE_MCP_SETTINGS_PATH`); older engine in VS Code globalStorage `saoudrizwan.claude-dev`. No `type` → SSE.
 
-## 4. Code layout
+## Code
 
-- `BrainFogCore` (Foundation only, tested): `Model`, one resolver per agent under `Resolvers/`, `Skills`, `MCP` (discovery and comment-preserving edits of JSON/JSONC/TOML), `Creating`, `Copying`, `Sharing` (AGENTS.md), `GlobalSync`, `Health`, `RuleFormat`, `History` (content-addressed versions, `ChangeSet`), `Pack`, `ProjectDiscovery`.
-- `BrainFog` (SwiftUI, macOS 26+): sidebar, the lens with four modes (Instructions & Memory, Skills, MCP Servers, Timeline), editor, change preview; FSEvents watching.
+- `BrainFogCore` (Foundation only): `Model`, `Resolvers/` (one per agent), `Skills`, `MCP` (discovery, JSONC/TOML edits that keep comments), `Creating`, `Copying`, `Sharing`, `GlobalSync`, `Health`, `RuleFormat`, `History`, `Pack`, `ProjectDiscovery`.
+- `BrainFog` (SwiftUI, macOS 26): sidebar, lens (Instructions & Memory, Skills, MCP Servers, Timeline), editor, change preview, FSEvents.
+- `brainfog-cli`: prints the resolved context for a folder.
 
-## 5. Interface
+## Interface
 
-Follows the macOS HIG: Liquid Glass only on system controls (toolbar, sidebar); content on plain grouped cards with concentric rows. Each agent has a stable colour, and uses its own installed app icon where there is one. Paths in a project are shown relative to it. Shortcuts: ⌘S save, ⌘R reload, Esc close the editor, ⇧⌘I / ⇧⌘E import and export a pack, ⇧⌘G show global items on project pages (off by default, so a project lists only its own files, skills and servers; a note says how many global files it also reads).
+macOS HIG: Liquid Glass only on system controls; content on grouped cards. Stable agent colours, installed app icons, project-relative paths. ⌘S save, ⌘R reload, Esc close editor, ⇧⌘I / ⇧⌘E import / export pack, ⇧⌘G show global items on project pages.
 
-## 6. Next
+## Next
 
-- Signing, notarization and updates.
-- Re-check each resolver against the agents' docs as they change (last full check: 2026-11). Still open: Copilot CLI's walk up to the repo root for `.mcp.json` and `.github/mcp.json` is modelled but not confirmed in GitHub's docs, which only say a workspace server beats a user one of the same name; Devin's other Windsurf channels and Zed. Nested AGENTS.md (OpenCode) and `.claude/rules` (Claude Code) below cwd load on demand, so they stay out by design (§2).
-- Maybe: compiling one source into each agent's format; sync across machines.
+- Signing, notarization, updates.
+- Keep resolvers in step with the agents' docs.
 
 ## License
 
-PolyForm Noncommercial 1.0.0 (source-available, not OSI open source).
+PolyForm Noncommercial 1.0.0 (source-available).

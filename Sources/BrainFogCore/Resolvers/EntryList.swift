@@ -24,7 +24,7 @@ struct EntryList {
         let (shown, truncated) = visible?(text) ?? (text, false)
         entries.append(ContextEntry(
             agent: agent, url: url, scope: scope, timing: timing, order: entries.count,
-            bytes: FileSupport.size(url), tokens: TokenEstimator.estimate(shown),
+            tokens: TokenEstimator.estimate(shown),
             truncated: truncated, importedBy: importedBy, note: note))
         return text
     }

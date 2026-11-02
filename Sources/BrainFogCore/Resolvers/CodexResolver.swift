@@ -10,9 +10,7 @@ public struct CodexResolver: ContextResolver {
 
     public func resolve(workingDirectory: URL, environment env: ResolverEnvironment) -> ResolvedContext {
         let cwd = workingDirectory.standardizedFileURL
-        let codexHome = env.variables["CODEX_HOME"].map {
-            URL(fileURLWithPath: FileSupport.expandTilde($0, home: env.home))
-        } ?? env.home.appendingPathComponent(".codex")
+        let codexHome = env.codexHome
         let config = CodexConfig(codexHome: codexHome, cwd: cwd)
         // project_root_markers, .git by default; an empty list keeps Codex in cwd.
         let projectRoot = config.hasRoot(above: cwd) ? config.root(of: cwd) : nil
@@ -246,10 +244,5 @@ struct CodexConfig {
         return line
     }
 
-    private static func strings(_ s: String) -> [String] {
-        let re = try! NSRegularExpression(pattern: #""([^"]*)"|'([^']*)'"#)
-        return re.matches(in: s, range: NSRange(s.startIndex..., in: s)).compactMap { m in
-            [1, 2].lazy.compactMap { Range(m.range(at: $0), in: s) }.first.map { String(s[$0]) }
-        }
-    }
+    private static func strings(_ s: String) -> [String] { CodexMCPToml.strings(in: s) }
 }
