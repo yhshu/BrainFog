@@ -705,10 +705,7 @@ public enum MCPEdit {
             if let existing, CodexMCPToml.parse(existing).contains(where: { $0.0 == server.name }) {
                 throw Failure.nameTaken(server.name, file)
             }
-            var start = existing ?? ""
-            if !start.isEmpty && !start.hasSuffix("\n") { start += "\n" }
-            if !start.isEmpty && !start.hasSuffix("\n\n") { start += "\n" }
-            return start + CodexMCPToml.table(for: server)
+            return CodexMCPToml.appending(server, to: existing ?? "")
         default:
             let key = key(for: location.format)
             // An empty file is as good as a missing one.
@@ -1085,12 +1082,22 @@ enum CodexMCPToml {
 
     private static func inlineTable(_ s: String) -> [String: String] {
         var out: [String: String] = [:]
-        for (k, v) in inlinePairs(s) { out[unquote(k)] = strings(in: v).first ?? v }
+        for (k, v) in inlinePairs(s) { out[unquote(k)] = value(v) }
         return out
     }
 
+    /// A raw TOML value as BrainFog shows it: a string's text, else as written.
+    private static func value(_ raw: String) -> String { strings(in: raw).first ?? raw }
+
+    // Edits work on "\n" lines; a file with Windows line endings is
+    // converted on the way in and back on the way out.
+    private static func isCRLF(_ text: String) -> Bool { text.contains("\r\n") }
+    private static func lf(_ text: String) -> String { text.replacingOccurrences(of: "\r\n", with: "\n") }
+    private static func crlf(_ text: String) -> String { text.replacingOccurrences(of: "\n", with: "\r\n") }
+
     /// `text` without the `[mcp_servers.<name>]` table and its sub-tables.
     static func removing(_ name: String, from text: String) -> String {
+        if isCRLF(text) { return crlf(removing(name, from: lf(text))) }
         var out: [String] = []
         var dropped: [String] = []
         var skipping = false
@@ -1115,6 +1122,7 @@ enum CodexMCPToml {
     /// The `[mcp_servers.<name>]` table with `key` set to the raw TOML
     /// `value`, or removed when nil. Nil when there is no such table.
     static func setting(_ key: String, to value: String?, in name: String, text: String) -> String? {
+        if isCRLF(text) { return setting(key, to: value, in: name, text: lf(text)).map(crlf) }
         var lines = text.components(separatedBy: "\n")
         guard let header = lines.firstIndex(where: { isHeader($0, of: name, sub: false) }) else { return nil }
         var end = header + 1
@@ -1133,21 +1141,49 @@ enum CodexMCPToml {
     /// `text` with the server `name` rewritten as `s`, in place. Only what
     /// the form owns is replaced; other settings, comments and sub-tables
     /// (`[mcp_servers.x.env_http_headers]`, `[mcp_servers.x.tools.search]`)
-    /// stay where they were, renamed along with the server.
+    /// stay where they were, renamed along with the server. Env and header
+    /// entries the edit leaves alone keep their text (`PORT = 8080 # dev`),
+    /// and a `[mcp_servers.x.env]` sub-table stays one.
     static func replacing(_ name: String, with s: MCPServer, in text: String) -> String {
-        let ownedKeys: Set<String> = ["command", "args", "env", "url", "http_headers", "enabled"]
-        // The form writes these inline, so a sub-table form of them goes.
-        let ownedTables: Set<String> = ["env", "http_headers"]
+        if isCRLF(text) { return crlf(replacing(name, with: s, in: lf(text))) }
         let lines = text.components(separatedBy: "\n")
         guard lines.contains(where: { isHeader($0, of: name, sub: false) }) else {
             return replacingTable(name, with: table(for: s), in: text)
         }
+        let ownedKeys: Set<String> = ["command", "args", "env", "url", "http_headers", "enabled"]
+        // The maps the form writes; the other one goes.
+        let maps: [String: [String: String]] = s.url == nil ? ["env": s.env] : ["http_headers": s.headers]
+        // How the file writes each map now: as a sub-table, or inline in the main table.
+        var subTables: Set<String> = [], inline: [String: [(String, String)]] = [:]
+        var inMain = false
+        for line in lines {
+            if let (parts, array) = header(line) {
+                let mine = !array && parts.count >= 2 && parts[0] == "mcp_servers" && parts[1] == name
+                inMain = mine && parts.count == 2
+                if mine, parts.count == 3, ownedKeys.contains(parts[2]) { subTables.insert(parts[2]) }
+            } else if inMain, let k = keyOf(line), maps[k] != nil, let eq = line.firstIndex(of: "=") {
+                inline[k] = inlinePairs(withoutComment(String(line[line.index(after: eq)...])))
+            }
+        }
+        // A sub-table that ends up empty goes, and its map is written inline if at all.
+        let keptTables = subTables.filter { maps[$0]?.isEmpty == false }
         var out: [String] = []
+        inMain = false
         // Where the line sits: in the server's main table, in one of its
-        // sub-tables (dropped or not), or elsewhere.
-        var inMain = false, inSub = false, dropTable = false
+        // sub-tables (dropped, edited or neither), or elsewhere.
+        var inSub = false, dropTable = false
+        var editing: String?, seen: Set<String> = []
         // Brackets a multi-line value leaves open, and whether it is dropped.
         var open = 0, dropValue = false
+        // Adds the edited sub-table's new entries after its last setting.
+        func finishSubTable() {
+            guard let map = editing.flatMap({ maps[$0] }) else { return }
+            var at = out.count
+            while at > 0, out[at - 1].trimmingCharacters(in: .whitespaces).isEmpty { at -= 1 }
+            out.insert(contentsOf: map.keys.filter { !seen.contains($0) }.sorted()
+                .map { "\(key($0)) = \(quote(map[$0]!))" }, at: at)
+            editing = nil
+        }
         for line in lines {
             if open > 0 {
                 open += depth(line)
@@ -1155,12 +1191,15 @@ enum CodexMCPToml {
                 continue
             }
             if let (parts, array) = header(line) {
+                finishSubTable()
                 let mine = parts.count >= 2 && parts[0] == "mcp_servers" && parts[1] == name
                 inMain = mine && !array && parts.count == 2
                 inSub = mine && !inMain
-                dropTable = inSub && !array && parts.count == 3 && ownedTables.contains(parts[2])
+                let owned = inSub && !array && parts.count == 3 && ownedKeys.contains(parts[2])
+                dropTable = owned && !keptTables.contains(parts[2])
+                if owned && !dropTable { editing = parts[2]; seen = [] }
                 if inMain {
-                    out += table(for: s).components(separatedBy: "\n").dropLast()
+                    out += table(for: s, inline: inline, omitting: keptTables).components(separatedBy: "\n").dropLast()
                 } else if dropTable {
                     continue
                 } else if inSub && s.name != name {
@@ -1171,17 +1210,25 @@ enum CodexMCPToml {
                 }
                 continue
             }
+            if let map = editing.flatMap({ maps[$0] }), let k = keyOf(line), let eq = line.firstIndex(of: "=") {
+                seen.insert(k)
+                let raw = withoutComment(String(line[line.index(after: eq)...])).trimmingCharacters(in: .whitespaces)
+                if let v = map[k] { out.append(value(raw) == v ? line : "\(key(k)) = \(quote(v))") }
+                continue
+            }
             let drop = (inSub && dropTable) || (inMain && keyOf(line).map(ownedKeys.contains) == true)
             if keyOf(line) != nil {
                 open = max(0, depth(line)); dropValue = drop
             }
             if !drop { out.append(line) }
         }
+        finishSubTable()
         return out.joined(separator: "\n")
     }
 
     /// `text` with the server's tables replaced by `table`, in the same place.
     static func replacingTable(_ name: String, with table: String, in text: String) -> String {
+        if isCRLF(text) { return crlf(replacingTable(name, with: table, in: lf(text))) }
         let lines = text.components(separatedBy: "\n")
         guard let first = lines.firstIndex(where: { isHeader($0, of: name, sub: true) }) else { return text + table }
         let without = removing(name, from: text).components(separatedBy: "\n")
@@ -1237,21 +1284,39 @@ enum CodexMCPToml {
         s.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil ? s : quote(s)
     }
 
-    static func table(for s: MCPServer) -> String {
+    /// `text` with the server's table added at the end, after a blank line.
+    static func appending(_ s: MCPServer, to text: String) -> String {
+        if isCRLF(text) { return crlf(appending(s, to: lf(text))) }
+        var start = text
+        if !start.isEmpty && !start.hasSuffix("\n") { start += "\n" }
+        if !start.isEmpty && !start.hasSuffix("\n\n") { start += "\n" }
+        return start + table(for: s)
+    }
+
+    /// The server's `[mcp_servers.<name>]` table. Maps in `omitting` are
+    /// left out; entries of the ones in `inline` whose value is unchanged
+    /// keep their raw TOML and order.
+    static func table(for s: MCPServer, inline: [String: [(String, String)]] = [:],
+                      omitting: Set<String> = []) -> String {
+        func map(_ k: String, _ m: [String: String]) -> String? {
+            guard !m.isEmpty, !omitting.contains(k) else { return nil }
+            var entries: [String] = [], seen: Set<String> = []
+            for (rawKey, raw) in inline[k] ?? [] {
+                let name = unquote(rawKey)
+                guard let v = m[name], seen.insert(name).inserted else { continue }
+                entries.append("\(rawKey) = " + (value(raw) == v ? raw : quote(v)))
+            }
+            entries += m.keys.filter { !seen.contains($0) }.sorted().map { "\(key($0)) = \(quote(m[$0]!))" }
+            return "\(k) = { " + entries.joined(separator: ", ") + " }"
+        }
         var lines = ["[mcp_servers.\(key(s.name))]"]
         if let url = s.url {
             lines.append("url = \(quote(url))")
-            if !s.headers.isEmpty {
-                lines.append("http_headers = { " + s.headers.sorted { $0.key < $1.key }
-                    .map { "\(key($0.key)) = \(quote($0.value))" }.joined(separator: ", ") + " }")
-            }
+            if let h = map("http_headers", s.headers) { lines.append(h) }
         } else {
             lines.append("command = \(quote(s.command ?? ""))")
             if !s.args.isEmpty { lines.append("args = [" + s.args.map(quote).joined(separator: ", ") + "]") }
-            if !s.env.isEmpty {
-                lines.append("env = { " + s.env.sorted { $0.key < $1.key }
-                    .map { "\(key($0.key)) = \(quote($0.value))" }.joined(separator: ", ") + " }")
-            }
+            if let e = map("env", s.env) { lines.append(e) }
         }
         if !s.enabled { lines.append("enabled = false") }
         return lines.joined(separator: "\n") + "\n"

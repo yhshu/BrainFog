@@ -78,6 +78,80 @@ import Testing
         #expect(FileSupport.read(codexFile(s)) == "[other]\nx = 1\n")
     }
 
+    @Test func codexEnvSubTableKeepsUnchangedEntriesAndComments() throws {
+        let s = try Sandbox()
+        try s.write(".codex/config.toml", """
+            [mcp_servers.a]
+            command = "a"
+
+            [mcp_servers.a.env]
+            # local dev
+            PORT = 8080 # default
+            MODE = "fast"
+            OLD = "x"
+
+            [other]
+            x = 1
+
+            """)
+        let a = try #require(codex(s).first)
+        #expect(a.env == ["PORT": "8080", "MODE": "fast", "OLD": "x"])
+        var changed = a
+        changed.env = ["PORT": "8080", "MODE": "slow", "NEW": "y"]
+        try MCPEdit.replace(a, with: changed, environment: s.env()).apply(history: s.history)
+        #expect(FileSupport.read(codexFile(s)) == """
+            [mcp_servers.a]
+            command = "a"
+
+            [mcp_servers.a.env]
+            # local dev
+            PORT = 8080 # default
+            MODE = "slow"
+            NEW = "y"
+
+            [other]
+            x = 1
+
+            """)
+        var cleared = try #require(codex(s).first)
+        cleared.env = [:]
+        try MCPEdit.replace(try #require(codex(s).first), with: cleared, environment: s.env()).apply(history: s.history)
+        #expect(FileSupport.read(codexFile(s)) == "[mcp_servers.a]\ncommand = \"a\"\n\n[other]\nx = 1\n")
+    }
+
+    @Test func codexInlineEnvKeepsRawValuesOfUnchangedEntries() throws {
+        let s = try Sandbox()
+        try s.write(".codex/config.toml", "[mcp_servers.a]\ncommand = \"a\"\nenv = { PORT = 8080, \"B\" = 'q' }\n")
+        let a = try #require(codex(s).first)
+        var changed = a
+        changed.env = ["PORT": "8080", "B": "q", "C": "z"]
+        changed.args = ["-v"]
+        try MCPEdit.replace(a, with: changed, environment: s.env()).apply(history: s.history)
+        #expect(FileSupport.read(codexFile(s))
+                == "[mcp_servers.a]\ncommand = \"a\"\nargs = [\"-v\"]\nenv = { PORT = 8080, \"B\" = 'q', C = \"z\" }\n")
+    }
+
+    @Test func codexEditsKeepWindowsLineEndings() throws {
+        let s = try Sandbox()
+        try s.write(".codex/config.toml", "[mcp_servers.a]\r\ncommand = \"a\"\r\n\r\n[mcp_servers.a.env]\r\nPORT = 8080\r\n")
+        let a = try #require(codex(s).first)
+        #expect(a.env == ["PORT": "8080"])
+        var changed = a
+        changed.env = ["PORT": "9090"]
+        try MCPEdit.replace(a, with: changed, environment: s.env()).apply(history: s.history)
+        #expect(FileSupport.read(codexFile(s)) == "[mcp_servers.a]\r\ncommand = \"a\"\r\n\r\n[mcp_servers.a.env]\r\nPORT = \"9090\"\r\n")
+
+        let b = try #require(codex(s).first)
+        try MCPEdit.setEnabled(b, false, environment: s.env()).apply(history: s.history)
+        #expect(FileSupport.read(codexFile(s))?.contains("command = \"a\"\r\nenabled = false\r\n") == true)
+
+        var added = MCPServer(agent: .codex, name: "c", scope: .user, file: codexFile(s))
+        added.command = "c"
+        try MCPEdit.add(added, to: .codex, file: codexFile(s), project: nil, environment: s.env()).apply(history: s.history)
+        try MCPEdit.remove(try #require(codex(s).first { $0.name == "a" }), environment: s.env()).apply(history: s.history)
+        #expect(FileSupport.read(codexFile(s)) == "[mcp_servers.c]\r\ncommand = \"c\"\r\n")
+    }
+
     @Test func multiLineArrayWithABracketInAStringReadsToItsEnd() throws {
         let s = try Sandbox()
         try s.write(".codex/config.toml", "[mcp_servers.a]\ncommand = \"a\"\nargs = [\n  \"--match=]\",\n  \"y\", # a ] here too\n]\nenabled = false\n")
